@@ -287,12 +287,12 @@ def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndar
         else:
             src_mean_sat = float(src_sat_vals.mean())
         delta      = ref_mean_sat - src_mean_sat
-        saturation = clamp(int(delta * 200), -65, 65)
-        vibrance   = clamp(int(delta * 170), -65, 65)
+        saturation = clamp(int(delta * 240), -70, 70)
+        vibrance   = clamp(int(delta * 210), -70, 70)
     else:
         # 基准 0.42：有色像素的中性参考饱和度（LR默认开发的典型值）
-        saturation = clamp(int((ref_mean_sat - 0.42) * 160), -60, 60)
-        vibrance   = clamp(int(saturation * 0.8), -60, 60)
+        saturation = clamp(int((ref_mean_sat - 0.42) * 200), -65, 65)
+        vibrance   = clamp(int(saturation * 1.2), -65, 65)
 
     return {
         'Vibrance':   vibrance,

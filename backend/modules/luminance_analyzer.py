@@ -143,9 +143,9 @@ def _diff_analysis(src_hist: np.ndarray, ref_hist: np.ndarray) -> dict:
     contrast = clamp((ref_std - src_std) / max(src_std, 0.01) * 150, -60, 60)
 
     highlights = clamp(-zone_delta('highlights') * 100, -80, 20)
-    shadows    = clamp( zone_delta('shadows')    * 100, -20, 60)
-    whites     = clamp(-zone_delta('whites')     *  80, -50, 30)
-    blacks     = clamp( zone_delta('blacks')     *  80, -30, 30)
+    shadows    = clamp(-zone_delta('shadows')    * 100, -20, 60)
+    whites     = clamp( zone_delta('whites')     *  80, -50, 30)
+    blacks     = clamp(-zone_delta('blacks')     *  80, -30, 30)
 
     return {
         'Exposure':   round(clamp(exposure_shift, -1.2, 1.2), 2),
@@ -166,9 +166,9 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
     exposure   = clamp((mean - 0.45) * 1.5, -1.0, 1.0)
     contrast   = clamp((std - 0.25) / 0.25 * 60, -50, 50)
     highlights = clamp((0.15 - zones['highlights'] - zones['whites']) * 300, -70, 20)
-    shadows    = clamp((zones['blacks'] + zones['shadows'] - 0.2) * 200, -20, 50)
-    whites     = clamp((0.05 - zones['whites']) * 300, -50, 30)
-    blacks     = clamp((zones['blacks'] - 0.03) * 300, -30, 30)
+    shadows    = clamp((0.2 - zones['blacks'] - zones['shadows']) * 200, -20, 50)
+    whites     = clamp((zones['whites'] - 0.05) * 300, -50, 30)
+    blacks     = clamp((0.03 - zones['blacks']) * 300, -30, 30)
 
     return {
         'Exposure':   round(exposure, 2),
