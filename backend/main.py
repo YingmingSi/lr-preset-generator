@@ -16,6 +16,7 @@ from modules.color_analyzer import analyze_color
 from modules.scene_analyzer import analyze_scene_and_correct
 from modules.camera_profiles import apply_camera_compensation, get_camera_description
 from modules.xmp_generator import generate_xmp, params_summary
+from modules.preset_renderer import render_and_validate
 
 app = FastAPI(title="LR Preset Generator", version="1.0.0")
 
@@ -72,13 +73,37 @@ async def analyze(
             src_scene_type=src_scene_type,
         )
 
+        # ── 自我验证与自动修正（仅双图模式）─────────────────────────────
+        validation   = {}
+        preview_b64  = None
+        if src_data is not None:
+            tone_curve  = luminance_params.get('tone_curve', [(0,0),(64,64),(128,128),(192,192),(255,255)])
+            all_params  = {**luminance_params, **color_params, **scene_result.get('params', {})}
+            val         = render_and_validate(
+                src_data['rgb_float'],
+                ref_data['rgb_float'],
+                all_params,
+                tone_curve,
+            )
+            # 将自动修正写回 scene_result.params，使 XMP 采用修正后的值
+            corrections = {k: v for k, v in val.get('corrections', {}).items()
+                           if not k.startswith('_')}
+            if corrections:
+                scene_result['params'].update(corrections)
+
+            preview_b64 = val.pop('preview_b64', None)
+            validation  = {k: v for k, v in val.items() if k != 'corrections'}
+            validation['corrections_applied'] = list(corrections.keys())
+            color_cast  = val.get('corrections', {}).get('_color_cast_note', '')
+            if color_cast:
+                validation['color_cast_note'] = color_cast
+        # ─────────────────────────────────────────────────────────────────
+
         xmp_content = generate_xmp(luminance_params, color_params, scene_result, preset_name=preset_name)
         summary     = params_summary(luminance_params, color_params, scene_result)
-
-        # 曲线风格标注
         curve_style = luminance_params.get('_curve_style', '')
 
-        return JSONResponse({
+        response_data = {
             "success":              True,
             "mode":                 mode,
             "report":               scene_result.get('report', {}),
@@ -88,7 +113,12 @@ async def analyze(
             "is_raw_source":        src_data.get('is_raw', False) if src_data else False,
             "camera_note":          camera_note,
             "curve_style":          curve_style,
-        })
+            "validation":           validation,
+        }
+        if preview_b64:
+            response_data["preview_b64"] = preview_b64
+
+        return JSONResponse(response_data)
 
     except Exception as e:
         raise HTTPException(500, f"分析失败：{str(e)}")
