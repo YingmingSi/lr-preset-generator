@@ -390,7 +390,7 @@ def _claude_param_correction(image_bytes: bytes, params: dict, scene_info: dict)
         if 'corrections' in correction:
             for k, v in correction['corrections'].items():
                 if k in params:
-                    params[k] = v
+                    params[k] = _clamp_correction(k, v)
 
         params['GrainAmount']    = correction.get('grain_amount', 0)
         params['_style_summary'] = correction.get('style_summary', '')
@@ -504,3 +504,27 @@ def _compress_for_api(image_bytes: bytes, max_size: int = 1200) -> str:
 
 def clamp(value, lo, hi):
     return max(lo, min(hi, value))
+
+
+_CORRECTION_LIMITS: dict = {
+    'Exposure':   (-2.0, 2.0),
+    'Contrast':   (-80,  80),
+    'Highlights': (-100, 100),
+    'Shadows':    (-100, 100),
+    'Whites':     (-100, 100),
+    'Blacks':     (-100, 100),
+    'Clarity':    (-100, 100),
+    'Vibrance':   (-60,  60),
+    'Saturation': (-60,  60),
+}
+
+def _clamp_correction(key: str, value):
+    """对 Claude 返回的校正值施加安全上限"""
+    lo, hi = _CORRECTION_LIMITS.get(key, (-100, 100))
+    try:
+        v = float(value)
+        if isinstance(lo, float):
+            return round(max(lo, min(hi, v)), 2)
+        return int(max(lo, min(hi, round(v))))
+    except (TypeError, ValueError):
+        return value

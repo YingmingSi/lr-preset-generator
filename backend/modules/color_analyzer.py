@@ -61,18 +61,28 @@ def analyze_color(ref_data: dict, src_data: Optional[dict] = None) -> dict:
 
 
 def _rgb_to_hsv(rgb_float: np.ndarray) -> np.ndarray:
-    """RGB转HSV，返回同形状数组，H范围0-360"""
-    h, w, _ = rgb_float.shape
-    flat = rgb_float.reshape(-1, 3)
+    """RGB转HSV（向量化），返回同形状数组，H范围0-360"""
+    r = rgb_float[:, :, 0]
+    g = rgb_float[:, :, 1]
+    b = rgb_float[:, :, 2]
 
-    hsv = np.zeros_like(flat)
-    for i, (r, g, b) in enumerate(flat):
-        h_val, s_val, v_val = colorsys.rgb_to_hsv(
-            float(r), float(g), float(b)
-        )
-        hsv[i] = [h_val * 360, s_val, v_val]
+    max_c = np.maximum(np.maximum(r, g), b)
+    min_c = np.minimum(np.minimum(r, g), b)
+    delta = max_c - min_c
 
-    return hsv.reshape(h, w, 3)
+    s = np.where(max_c > 0, delta / np.maximum(max_c, 1e-9), 0.0)
+
+    h = np.zeros_like(r)
+    eps = 1e-9
+    mask_r = (delta > eps) & (max_c == r)
+    mask_g = (delta > eps) & (max_c == g)
+    mask_b = (delta > eps) & (max_c == b)
+
+    h[mask_r] = (60.0 * ((g[mask_r] - b[mask_r]) / delta[mask_r])) % 360.0
+    h[mask_g] = (60.0 * ((b[mask_g] - r[mask_g]) / delta[mask_g]) + 120.0) % 360.0
+    h[mask_b] = (60.0 * ((r[mask_b] - g[mask_b]) / delta[mask_b]) + 240.0) % 360.0
+
+    return np.stack([h, s, max_c], axis=2)
 
 
 def _get_hue_mask(hsv: np.ndarray, bucket_name: str) -> np.ndarray:
@@ -138,7 +148,7 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
 
         # 饱和度变化
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_adj = clamp(int(sat_delta * 280), -100, 100)
+        sat_adj = clamp(int(sat_delta * 160), -80, 80)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
@@ -156,37 +166,31 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
     params = {}
     bucket_stats = {b: _analyze_bucket(ref_hsv, b) for b in HUE_BUCKETS}
 
-    # 计算各色相的权重总和
-    total_weight = sum(s['weight'] for s in bucket_stats.values())
-    if total_weight < 1e-6:
-        total_weight = 1.0
-
-    # 计算"期望的"色相分布（均匀分布作为中性基准）
-    neutral_weight = 1.0 / len(HUE_BUCKETS)
-
     for bucket, stats in bucket_stats.items():
-        weight_ratio = stats['weight'] / max(total_weight * neutral_weight, 1e-6)
-
-        # 该色相在图中的比重决定是否需要强化或压制
+        # 该色相在图中几乎不存在 → 无有效像素，不做调整
         if stats['weight'] < 0.01:
-            # 几乎没有这个颜色 → 可能需要压制
-            sat_adj = clamp(int((stats['sat_mean'] - 0.5) * -60), -50, 10)
-        else:
-            # 存在这个颜色 → 分析其特征
-            sat_adj = clamp(int((stats['sat_mean'] - 0.45) * 130), -60, 60)
+            params[f'HueAdjustment{bucket}']        = 0
+            params[f'SaturationAdjustment{bucket}'] = 0
+            params[f'LuminanceAdjustment{bucket}']  = 0
+            continue
 
-        # 色相偏移：分析色相均值与桶中心的偏差
+        sat_adj = clamp(int((stats['sat_mean'] - 0.40) * 110), -50, 50)
+
         if stats['hue_mean'] is not None:
-            hue_offset = stats['hue_mean'] - stats['hue_center'] if 'hue_center' in stats else 0
+            hue_center = HUE_BUCKETS[bucket][0]
+            hue_offset = stats['hue_mean'] - hue_center
+            # 红色桶跨越0°，修正偏移方向
+            if bucket == 'Red' and abs(hue_offset) > 180:
+                hue_offset -= 360 if hue_offset > 0 else -360
             hue_adj = clamp(int(hue_offset * 0.8), -40, 40)
         else:
             hue_adj = 0
 
         lum_adj = clamp(int((stats['val_mean'] - 0.5) * 60), -50, 50)
 
-        params[f'HueAdjustment{bucket}'] = hue_adj
+        params[f'HueAdjustment{bucket}']        = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
-        params[f'LuminanceAdjustment{bucket}'] = lum_adj
+        params[f'LuminanceAdjustment{bucket}']  = lum_adj
 
     return params
 
@@ -194,35 +198,55 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
 def _derive_rgb_curves(ref_rgb: np.ndarray, src_rgb: Optional[np.ndarray] = None) -> dict:
     """
     推导RGB分量色调曲线
-    分析各通道在不同亮度区间的色彩偏向
+    Mode A：分析参考图各通道偏离中性的程度（35%衰减，避免与HSL叠加）
+    Mode B：计算原图→参考图的通道差值，仅应用50%差值
     """
+    ref_gray = 0.2126 * ref_rgb[:, :, 0] + 0.7152 * ref_rgb[:, :, 1] + 0.0722 * ref_rgb[:, :, 2]
+    if src_rgb is not None:
+        src_gray = 0.2126 * src_rgb[:, :, 0] + 0.7152 * src_rgb[:, :, 1] + 0.0722 * src_rgb[:, :, 2]
+
     curves = {}
+    lum_points = np.linspace(0, 1, 9)
 
     for ch_idx, ch_name in enumerate(['Red', 'Green', 'Blue']):
-        channel = ref_rgb[:, :, ch_idx]
-        gray = 0.2126 * ref_rgb[:, :, 0] + 0.7152 * ref_rgb[:, :, 1] + 0.0722 * ref_rgb[:, :, 2]
-
-        # 在8个亮度区间采样通道值
+        ref_ch = ref_rgb[:, :, ch_idx]
         points = []
-        lum_points = np.linspace(0, 1, 9)
 
         for lum in lum_points:
-            lo = max(0, lum - 0.08)
-            hi = min(1, lum + 0.08)
-            mask = (gray >= lo) & (gray < hi)
+            lo = max(0.0, lum - 0.08)
+            hi = min(1.0, lum + 0.08)
 
-            if mask.sum() > 20:
-                ch_mean = float(channel[mask].mean())
+            if src_rgb is not None:
+                src_ch   = src_rgb[:, :, ch_idx]
+                src_mask = (src_gray >= lo) & (src_gray < hi)
+                ref_mask = (ref_gray >= lo) & (ref_gray < hi)
+                if src_mask.sum() > 20 and ref_mask.sum() > 20:
+                    delta    = float(ref_ch[ref_mask].mean()) - float(src_ch[src_mask].mean())
+                    dampened = clamp(lum + delta * 0.5, 0.0, 1.0)
+                else:
+                    dampened = lum
             else:
-                ch_mean = float(lum)  # 无数据时使用中性值
+                mask = (ref_gray >= lo) & (ref_gray < hi)
+                if mask.sum() > 20:
+                    ch_mean  = float(ref_ch[mask].mean())
+                    dampened = lum + (ch_mean - lum) * 0.35
+                else:
+                    dampened = lum
 
-            inp = int(lum * 255)
-            out = int(ch_mean * 255)
-            points.append((inp, out))
+            points.append((int(lum * 255), clamp(int(dampened * 255), 0, 255)))
 
-        curves[f'tone_curve_{ch_name.lower()}'] = points
+        curves[f'tone_curve_{ch_name.lower()}'] = _enforce_monotone(points)
 
     return curves
+
+
+def _enforce_monotone(points: list) -> list:
+    """确保曲线控制点输出值非递减（Lightroom要求）"""
+    result = list(points)
+    for i in range(1, len(result)):
+        if result[i][1] < result[i - 1][1]:
+            result[i] = (result[i][0], result[i - 1][1])
+    return result
 
 
 def _analyze_color_grading(rgb_float: np.ndarray) -> dict:
@@ -273,27 +297,30 @@ def _analyze_color_grading(rgb_float: np.ndarray) -> dict:
 
 
 def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndarray]) -> dict:
-    """估算整体饱和度和自然饱和度"""
-    sat_vals = ref_hsv[:, :, 1].flatten()
-    mean_sat = float(sat_vals.mean())
-    sat_std = float(sat_vals.std())
+    """估算整体饱和度和自然饱和度
+    Mode B：计算原图→参考图的饱和度差值
+    Mode A：相对于经验中性基准 0.35 估算
+    """
+    ref_mean_sat = float(ref_hsv[:, :, 1].mean())
+    ref_sat_std  = float(ref_hsv[:, :, 1].std())
 
-    # 饱和度分布集中 → 风格化强（高饱和或低饱和）
-    # 饱和度分布分散 → 自然感强
-
-    # 整体饱和度：相对于中性值0.45的偏差
-    saturation = clamp(int((mean_sat - 0.45) * 130), -60, 60)
-
-    # 自然饱和度：sat_std小说明高度风格化，用vibrance而非saturation
-    if sat_std < 0.15:
-        vibrance = saturation
-        saturation = int(saturation * 0.4)
+    if src_rgb is not None:
+        src_hsv      = _rgb_to_hsv(src_rgb)
+        src_mean_sat = float(src_hsv[:, :, 1].mean())
+        delta        = ref_mean_sat - src_mean_sat
+        saturation   = clamp(int(delta * 160), -50, 50)
+        vibrance     = clamp(int(delta * 130), -50, 50)
     else:
-        vibrance = int(saturation * 0.5)
+        saturation = clamp(int((ref_mean_sat - 0.35) * 120), -50, 50)
+        if ref_sat_std < 0.15:
+            vibrance   = saturation
+            saturation = int(saturation * 0.7)
+        else:
+            vibrance = int(saturation * 0.8)
 
     return {
-        'Vibrance':   clamp(vibrance, -60, 60),
-        'Saturation': clamp(saturation, -60, 60),
+        'Vibrance':   clamp(vibrance,   -50, 50),
+        'Saturation': clamp(saturation, -50, 50),
     }
 
 

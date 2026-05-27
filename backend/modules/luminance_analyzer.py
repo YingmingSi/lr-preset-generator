@@ -136,7 +136,7 @@ def _diff_analysis(src_hist: np.ndarray, ref_hist: np.ndarray) -> dict:
 
     src_mean = sum(i * src_hist[i] for i in range(256)) / 255.0
     ref_mean = sum(i * ref_hist[i] for i in range(256)) / 255.0
-    exposure_shift = (ref_mean - src_mean) * 6.0
+    exposure_shift = (ref_mean - src_mean) * 2.5
 
     src_std  = _hist_std(src_hist)
     ref_std  = _hist_std(ref_hist)
@@ -148,7 +148,7 @@ def _diff_analysis(src_hist: np.ndarray, ref_hist: np.ndarray) -> dict:
     blacks     = clamp( zone_delta('blacks')     *  80, -30, 30)
 
     return {
-        'Exposure':   round(clamp(exposure_shift, -1.5, 1.5), 2),
+        'Exposure':   round(clamp(exposure_shift, -1.2, 1.2), 2),
         'Contrast':   int(contrast),
         'Highlights': int(highlights),
         'Shadows':    int(shadows),
@@ -163,7 +163,7 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
     mean  = sum(i * ref_hist[i] for i in range(256)) / 255.0
     std   = _hist_std(ref_hist)
 
-    exposure   = clamp((mean - 0.45) * 3.0, -1.5, 1.5)
+    exposure   = clamp((mean - 0.45) * 1.5, -1.0, 1.0)
     contrast   = clamp((std - 0.25) / 0.25 * 60, -50, 50)
     highlights = clamp((0.15 - zones['highlights'] - zones['whites']) * 300, -70, 20)
     shadows    = clamp((zones['blacks'] + zones['shadows'] - 0.2) * 200, -20, 50)
@@ -196,12 +196,11 @@ def _derive_tone_curve(gray: np.ndarray, num_points: int = 9) -> list:
         mask = (gray >= lo) & (gray < hi)
 
         if mask.sum() > 50:
-            # 该亮度区间内的实际均值
             zone_mean = float(gray[mask].mean())
-            # 向输入点靠拢（避免过度弯曲），混合比例6:4
-            out_norm = inp_norm * 0.4 + zone_mean * 0.6
+            # 图像数据40%权重，输入点60%权重，防止曲线震荡
+            out_norm = inp_norm * 0.6 + zone_mean * 0.4
         else:
-            out_norm = inp_norm  # 无数据时保持中性
+            out_norm = inp_norm
 
         out = clamp(int(out_norm * 255), 0, 255)
         curve_points.append((int(inp), out))
@@ -209,6 +208,12 @@ def _derive_tone_curve(gray: np.ndarray, num_points: int = 9) -> list:
     # 确保端点合理
     curve_points[0]  = (0,   clamp(curve_points[0][1],  0,  25))
     curve_points[-1] = (255, clamp(curve_points[-1][1], 230, 255))
+
+    # 强制单调递增（LR要求）
+    for i in range(1, len(curve_points)):
+        if curve_points[i][1] < curve_points[i - 1][1]:
+            curve_points[i] = (curve_points[i][0], curve_points[i - 1][1])
+
     return curve_points
 
 

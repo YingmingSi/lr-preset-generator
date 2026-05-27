@@ -70,6 +70,7 @@
       crs:GrainAmount="{GrainAmount}"
       crs:GrainSize="25"
       crs:GrainFrequency="50"
+      crs:ToneCurveName2012="Custom"
       crs:ConvertToGrayscale="False"
       crs:PresetType="Normal"
       crs:Cluster=""

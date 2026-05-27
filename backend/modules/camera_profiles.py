@@ -7,17 +7,16 @@
 CAMERA_COMPENSATION = {
     'canon': {
         # Canon偏暖，皮肤色好，整体饱和度略高
-        'Temperature':                -100,
+        # Temperature已移除：XMP使用As Shot白平衡，Temperature字段不生效
         'SaturationAdjustmentRed':    -5,
         'SaturationAdjustmentOrange': -5,
-        'description': 'Canon Adobe Standard偏暖，略微修正色温和暖色饱和度',
+        'description': 'Canon Adobe Standard偏暖，略微修正暖色饱和度',
     },
     'nikon': {
         # Nikon偏冷，细节丰富，绿色略重
-        'Temperature':               +150,
         'SaturationAdjustmentGreen': -8,
         'HueAdjustmentGreen':        +5,
-        'description': 'Nikon Adobe Standard偏冷偏绿，修正色温和绿色色相',
+        'description': 'Nikon Adobe Standard偏绿，修正绿色色相',
     },
     'sony': {
         # Sony偏绿，需要色相和色调校正
