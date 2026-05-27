@@ -298,20 +298,31 @@ def _analyze_color_grading(rgb_float: np.ndarray) -> dict:
 
 def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndarray]) -> dict:
     """估算整体饱和度和自然饱和度
-    Mode B：计算原图→参考图的饱和度差值
-    Mode A：相对于经验中性基准 0.35 估算
+    Mode B：计算原图→参考图的饱和度差值（只统计有色像素）
+    Mode A：相对于经验中性基准估算（只统计有色像素，基准0.42）
     """
-    ref_mean_sat = float(ref_hsv[:, :, 1].mean())
-    ref_sat_std  = float(ref_hsv[:, :, 1].std())
+    ref_sat_vals  = ref_hsv[:, :, 1]
+    ref_color_mask = ref_sat_vals > 0.12
+    # 只在有实际颜色的像素上计算均值，避免大量中性像素压低结果
+    if ref_color_mask.sum() > 500:
+        ref_mean_sat = float(ref_sat_vals[ref_color_mask].mean())
+    else:
+        ref_mean_sat = float(ref_sat_vals.mean())
 
     if src_rgb is not None:
-        src_hsv      = _rgb_to_hsv(src_rgb)
-        src_mean_sat = float(src_hsv[:, :, 1].mean())
-        delta        = ref_mean_sat - src_mean_sat
-        saturation   = clamp(int(delta * 200), -65, 65)
-        vibrance     = clamp(int(delta * 170), -65, 65)
+        src_hsv       = _rgb_to_hsv(src_rgb)
+        src_sat_vals  = src_hsv[:, :, 1]
+        src_color_mask = src_sat_vals > 0.12
+        if src_color_mask.sum() > 500:
+            src_mean_sat = float(src_sat_vals[src_color_mask].mean())
+        else:
+            src_mean_sat = float(src_sat_vals.mean())
+        delta      = ref_mean_sat - src_mean_sat
+        saturation = clamp(int(delta * 200), -65, 65)
+        vibrance   = clamp(int(delta * 170), -65, 65)
     else:
-        saturation = clamp(int((ref_mean_sat - 0.35) * 160), -60, 60)
+        # 基准 0.42：有色像素的中性参考饱和度（LR默认开发的典型值）
+        saturation = clamp(int((ref_mean_sat - 0.42) * 160), -60, 60)
         vibrance   = clamp(int(saturation * 0.8), -60, 60)
 
     return {
