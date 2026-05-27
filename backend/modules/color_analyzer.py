@@ -148,11 +148,11 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
 
         # 饱和度变化
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_adj = clamp(int(sat_delta * 160), -80, 80)
+        sat_adj = clamp(int(sat_delta * 190), -80, 80)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
-        lum_adj = clamp(int(val_delta * 150), -100, 100)
+        lum_adj = clamp(int(val_delta * 170), -100, 100)
 
         params[f'HueAdjustment{bucket}'] = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
@@ -174,7 +174,7 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             params[f'LuminanceAdjustment{bucket}']  = 0
             continue
 
-        sat_adj = clamp(int((stats['sat_mean'] - 0.40) * 150), -65, 65)
+        sat_adj = clamp(int((stats['sat_mean'] - 0.35) * 200), -65, 65)
 
         if stats['hue_mean'] is not None:
             hue_center = HUE_BUCKETS[bucket][0]
@@ -186,7 +186,7 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
         else:
             hue_adj = 0
 
-        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 60), -50, 50)
+        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 100), -50, 50)
 
         params[f'HueAdjustment{bucket}']        = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
