@@ -148,11 +148,11 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
 
         # 饱和度变化
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_adj = clamp(int(sat_delta * 220), -100, 100)
+        sat_adj = clamp(int(sat_delta * 260), -100, 100)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
-        lum_adj = clamp(int(val_delta * 200), -100, 100)
+        lum_adj = clamp(int(val_delta * 220), -100, 100)
 
         params[f'HueAdjustment{bucket}'] = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
@@ -174,7 +174,9 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             params[f'LuminanceAdjustment{bucket}']  = 0
             continue
 
-        sat_adj = clamp(int((stats['sat_mean'] - 0.35) * 230), -80, 80)
+        # 基线 0.25：典型 RAW 中性开发的有色像素饱和度（肤色/橙色约 0.25-0.32）
+        # 低于 0.35 的旧基线，避免人像橙色等低饱和色被误判为需要降饱和
+        sat_adj = clamp(int((stats['sat_mean'] - 0.25) * 260), -80, 80)
 
         if stats['hue_mean'] is not None:
             hue_center = HUE_BUCKETS[bucket][0]
@@ -186,7 +188,7 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
         else:
             hue_adj = 0
 
-        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 130), -60, 60)
+        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 150), -60, 60)
 
         params[f'HueAdjustment{bucket}']        = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
@@ -287,12 +289,12 @@ def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndar
         else:
             src_mean_sat = float(src_sat_vals.mean())
         delta      = ref_mean_sat - src_mean_sat
-        saturation = clamp(int(delta * 240), -70, 70)
-        vibrance   = clamp(int(delta * 210), -70, 70)
+        saturation = clamp(int(delta * 280), -80, 80)
+        vibrance   = clamp(int(delta * 300), -80, 80)
     else:
-        # 基准 0.42：有色像素的中性参考饱和度（LR默认开发的典型值）
-        saturation = clamp(int((ref_mean_sat - 0.42) * 200), -65, 65)
-        vibrance   = clamp(int(saturation * 1.2), -65, 65)
+        # 基准 0.38：有色像素的中性参考饱和度
+        saturation = clamp(int((ref_mean_sat - 0.38) * 260), -75, 75)
+        vibrance   = clamp(int(saturation * 1.3), -75, 75)
 
     return {
         'Vibrance':   vibrance,
