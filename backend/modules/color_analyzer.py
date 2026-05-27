@@ -197,47 +197,16 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
 
 def _derive_rgb_curves(ref_rgb: np.ndarray, src_rgb: Optional[np.ndarray] = None) -> dict:
     """
-    推导RGB分量色调曲线
-    Mode A：分析参考图各通道偏离中性的程度（35%衰减，避免与HSL叠加）
-    Mode B：计算原图→参考图的通道差值，仅应用50%差值
+    RGB分量色调曲线：返回中性曲线。
+    颜色信息已由HSL面板完整捕捉；RGB分量曲线会与HSL叠加产生色偏和过曝，
+    因此统一输出线性恒等曲线，避免干扰。
     """
-    ref_gray = 0.2126 * ref_rgb[:, :, 0] + 0.7152 * ref_rgb[:, :, 1] + 0.0722 * ref_rgb[:, :, 2]
-    if src_rgb is not None:
-        src_gray = 0.2126 * src_rgb[:, :, 0] + 0.7152 * src_rgb[:, :, 1] + 0.0722 * src_rgb[:, :, 2]
-
-    curves = {}
-    lum_points = np.linspace(0, 1, 9)
-
-    for ch_idx, ch_name in enumerate(['Red', 'Green', 'Blue']):
-        ref_ch = ref_rgb[:, :, ch_idx]
-        points = []
-
-        for lum in lum_points:
-            lo = max(0.0, lum - 0.08)
-            hi = min(1.0, lum + 0.08)
-
-            if src_rgb is not None:
-                src_ch   = src_rgb[:, :, ch_idx]
-                src_mask = (src_gray >= lo) & (src_gray < hi)
-                ref_mask = (ref_gray >= lo) & (ref_gray < hi)
-                if src_mask.sum() > 20 and ref_mask.sum() > 20:
-                    delta    = float(ref_ch[ref_mask].mean()) - float(src_ch[src_mask].mean())
-                    dampened = clamp(lum + delta * 0.5, 0.0, 1.0)
-                else:
-                    dampened = lum
-            else:
-                mask = (ref_gray >= lo) & (ref_gray < hi)
-                if mask.sum() > 20:
-                    ch_mean  = float(ref_ch[mask].mean())
-                    dampened = lum + (ch_mean - lum) * 0.35
-                else:
-                    dampened = lum
-
-            points.append((int(lum * 255), clamp(int(dampened * 255), 0, 255)))
-
-        curves[f'tone_curve_{ch_name.lower()}'] = _enforce_monotone(points)
-
-    return curves
+    identity = [(0, 0), (64, 64), (128, 128), (192, 192), (255, 255)]
+    return {
+        'tone_curve_red':   identity,
+        'tone_curve_green': identity,
+        'tone_curve_blue':  identity,
+    }
 
 
 def _enforce_monotone(points: list) -> list:
