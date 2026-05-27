@@ -10,8 +10,6 @@ from modules.luminance_analyzer import format_tone_curve_xml
 
 
 DEFAULT_PARAMS = {
-    'Temperature': 5500,
-    'Tint': 0,
     'Exposure': 0.0,
     'Contrast': 0,
     'Highlights': 0,
@@ -145,9 +143,7 @@ def params_summary(luminance_params: dict, color_params: dict, scene_result: dic
             '自然饱和度': color_params.get('Vibrance', 0),
         },
         '白平衡': {
-            '色温':   color_params.get('Temperature', 5500),
-            '色调':   color_params.get('Tint', 0),
-            '置信度': '低（建议根据原片手动校准）',
+            '说明': '已设为As Shot，LR将自动保持原图白平衡',
         },
         'HSL色相偏移': {
             k.replace('HueAdjustment', ''): v

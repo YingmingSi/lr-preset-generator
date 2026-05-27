@@ -136,7 +136,7 @@ def _diff_analysis(src_hist: np.ndarray, ref_hist: np.ndarray) -> dict:
 
     src_mean = sum(i * src_hist[i] for i in range(256)) / 255.0
     ref_mean = sum(i * ref_hist[i] for i in range(256)) / 255.0
-    exposure_shift = (ref_mean - src_mean) * 10.0
+    exposure_shift = (ref_mean - src_mean) * 6.0
 
     src_std  = _hist_std(src_hist)
     ref_std  = _hist_std(ref_hist)
@@ -148,7 +148,7 @@ def _diff_analysis(src_hist: np.ndarray, ref_hist: np.ndarray) -> dict:
     blacks     = clamp( zone_delta('blacks')     *  80, -30, 30)
 
     return {
-        'Exposure':   round(clamp(exposure_shift, -2.0, 2.0), 2),
+        'Exposure':   round(clamp(exposure_shift, -1.5, 1.5), 2),
         'Contrast':   int(contrast),
         'Highlights': int(highlights),
         'Shadows':    int(shadows),
@@ -163,7 +163,7 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
     mean  = sum(i * ref_hist[i] for i in range(256)) / 255.0
     std   = _hist_std(ref_hist)
 
-    exposure   = clamp((mean - 0.45) * 6.0, -2.0, 2.0)
+    exposure   = clamp((mean - 0.45) * 3.0, -1.5, 1.5)
     contrast   = clamp((std - 0.25) / 0.25 * 60, -50, 50)
     highlights = clamp((0.15 - zones['highlights'] - zones['whites']) * 300, -70, 20)
     shadows    = clamp((zones['blacks'] + zones['shadows'] - 0.2) * 200, -20, 50)
@@ -181,29 +181,34 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
 
 
 def _derive_tone_curve(gray: np.ndarray, num_points: int = 9) -> list:
-    """从参考图推导色调曲线控制点"""
-    hist, _ = np.histogram(gray, bins=256, range=(0, 1))
-    hist = hist.astype(np.float32) / hist.sum()
-
+    """
+    从参考图推导色调曲线控制点
+    使用分段亮度均值对比，避免CDF拉伸失真
+    """
     input_points = np.linspace(0, 255, num_points, dtype=int)
     curve_points = []
 
     for inp in input_points:
         inp_norm = inp / 255.0
-        window   = 15
-        lo = max(0,   int((inp_norm - window / 255.0) * 256))
-        hi = min(255, int((inp_norm + window / 255.0) * 256))
-        local_sum = hist[lo:hi + 1].sum()
-        if local_sum > 0:
-            local_mean = sum(i * hist[i] for i in range(lo, hi + 1)) / local_sum
-        else:
-            local_mean = inp_norm
+        half_win = 0.06  # 采样窗口±6%亮度范围
+        lo = max(0.0, inp_norm - half_win)
+        hi = min(1.0, inp_norm + half_win)
+        mask = (gray >= lo) & (gray < hi)
 
-        out = clamp(int(local_mean * 255), 0, 255)
+        if mask.sum() > 50:
+            # 该亮度区间内的实际均值
+            zone_mean = float(gray[mask].mean())
+            # 向输入点靠拢（避免过度弯曲），混合比例6:4
+            out_norm = inp_norm * 0.4 + zone_mean * 0.6
+        else:
+            out_norm = inp_norm  # 无数据时保持中性
+
+        out = clamp(int(out_norm * 255), 0, 255)
         curve_points.append((int(inp), out))
 
-    curve_points[0]  = (0,   curve_points[0][1])
-    curve_points[-1] = (255, curve_points[-1][1])
+    # 确保端点合理
+    curve_points[0]  = (0,   clamp(curve_points[0][1],  0,  25))
+    curve_points[-1] = (255, clamp(curve_points[-1][1], 230, 255))
     return curve_points
 
 

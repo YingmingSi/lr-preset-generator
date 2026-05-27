@@ -54,7 +54,7 @@ def _load_raw(file_bytes: bytes, filename: str) -> dict:
                 use_camera_wb=True,
                 output_color=rawpy.ColorSpace.sRGB,
                 output_bps=16,
-                no_auto_bright=False,
+                no_auto_bright=True,
                 bright=1.0,
             )
         # 转换为8bit

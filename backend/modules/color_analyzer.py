@@ -138,7 +138,7 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
 
         # 饱和度变化
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_adj = clamp(int(sat_delta * 200), -100, 100)
+        sat_adj = clamp(int(sat_delta * 280), -100, 100)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
@@ -173,7 +173,7 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             sat_adj = clamp(int((stats['sat_mean'] - 0.5) * -60), -50, 10)
         else:
             # 存在这个颜色 → 分析其特征
-            sat_adj = clamp(int((stats['sat_mean'] - 0.45) * 80), -60, 60)
+            sat_adj = clamp(int((stats['sat_mean'] - 0.45) * 130), -60, 60)
 
         # 色相偏移：分析色相均值与桶中心的偏差
         if stats['hue_mean'] is not None:
@@ -282,7 +282,7 @@ def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndar
     # 饱和度分布分散 → 自然感强
 
     # 整体饱和度：相对于中性值0.45的偏差
-    saturation = clamp(int((mean_sat - 0.45) * 80), -60, 60)
+    saturation = clamp(int((mean_sat - 0.45) * 130), -60, 60)
 
     # 自然饱和度：sat_std小说明高度风格化，用vibrance而非saturation
     if sat_std < 0.15:
@@ -299,67 +299,18 @@ def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndar
 
 def _estimate_white_balance_diff(src_rgb: np.ndarray, ref_rgb: np.ndarray) -> dict:
     """
-    估算白平衡调整方向（仅给方向，不给精确值）
-    通过分析中性色区域的色彩偏移
+    双图模式：白平衡保持原图设置（As Shot）
+    不输出任何色温调整值，由LR根据RAW原图自行判断
     """
-    def get_neutral_cast(rgb):
-        """找到接近灰色的像素，分析其色偏"""
-        r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-        # 选择饱和度低的像素（中性色）
-        max_c = np.maximum(np.maximum(r, g), b)
-        min_c = np.minimum(np.minimum(r, g), b)
-        sat = np.where(max_c > 0, (max_c - min_c) / max_c, 0)
-        neutral = sat < 0.15
-
-        if neutral.sum() < 100:
-            return 0, 0  # 无中性色参考
-
-        r_mean = float(r[neutral].mean())
-        g_mean = float(g[neutral].mean())
-        b_mean = float(b[neutral].mean())
-
-        # 色温偏移：R-B差值
-        temp_cast = r_mean - b_mean
-        # 色调偏移：G与RB均值的差
-        tint_cast = g_mean - (r_mean + b_mean) / 2
-
-        return temp_cast, tint_cast
-
-    src_temp, src_tint = get_neutral_cast(src_rgb)
-    ref_temp, ref_tint = get_neutral_cast(ref_rgb)
-
-    temp_delta = ref_temp - src_temp
-    tint_delta = ref_tint - src_tint
-
-    # 映射到LR色温范围（只给大致方向）
-    temp_adj = clamp(int(temp_delta * 800), -2000, 2000)
-    tint_adj = clamp(int(tint_delta * 300), -50, 50)
-
     return {
-        'Temperature': temp_adj,
-        'Tint': tint_adj,
-        'wb_confidence': 'low',  # 标记为低置信度
+        'wb_confidence': 'as_shot',
     }
 
 
 def _estimate_white_balance_single(rgb_float: np.ndarray) -> dict:
-    """单张图白平衡感知（更低置信度）"""
-    r_mean = float(rgb_float[:, :, 0].mean())
-    b_mean = float(rgb_float[:, :, 2].mean())
-    rb_diff = r_mean - b_mean
-
-    # 只给大致色温感知
-    if rb_diff > 0.05:
-        temp = 5800   # 偏暖
-    elif rb_diff < -0.05:
-        temp = 5000   # 偏冷
-    else:
-        temp = 5400   # 中性
-
+    """单图模式：白平衡同样保持As Shot，不做推算"""
     return {
-        'Temperature': temp,
-        'Tint': 0,
-        'wb_confidence': 'very_low',
+        'wb_confidence': 'as_shot',
     }
 
 
