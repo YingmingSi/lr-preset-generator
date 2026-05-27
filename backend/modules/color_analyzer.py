@@ -20,6 +20,8 @@ HUE_BUCKETS = {
     'Magenta': (315, 300, 345),
 }
 
+WARM_BUCKETS = {'Red', 'Orange', 'Yellow'}
+
 
 def analyze_color(ref_data: dict, src_data: Optional[dict] = None) -> dict:
     """
@@ -33,23 +35,27 @@ def analyze_color(ref_data: dict, src_data: Optional[dict] = None) -> dict:
         色彩相关的LR参数字典
     """
     ref_hsv = _rgb_to_hsv(ref_data['rgb_float'])
+    src_rgb = src_data['rgb_float'] if src_data else None
 
     if src_data is not None:
-        src_hsv = _rgb_to_hsv(src_data['rgb_float'])
+        src_hsv = _rgb_to_hsv(src_rgb)
         hsl_params = _diff_hsl(src_hsv, ref_hsv)
-        wb_params = _estimate_white_balance_diff(src_data['rgb_float'], ref_data['rgb_float'])
+        wb_params = _estimate_white_balance_diff(src_rgb, ref_data['rgb_float'])
     else:
         hsl_params = _feature_hsl(ref_hsv)
         wb_params = _estimate_white_balance_single(ref_data['rgb_float'])
 
     # 色调曲线RGB分量
-    rgb_curves = _derive_rgb_curves(ref_data['rgb_float'], src_data['rgb_float'] if src_data else None)
+    rgb_curves = _derive_rgb_curves(ref_data['rgb_float'], src_rgb)
 
     # 颜色分级（阴影/高光对立色）
     color_grading = _analyze_color_grading(ref_data['rgb_float'])
 
     # 整体饱和度/自然饱和度
-    vibrance_sat = _estimate_vibrance_saturation(ref_hsv, src_data['rgb_float'] if src_data else None)
+    vibrance_sat = _estimate_vibrance_saturation(ref_hsv, src_rgb)
+
+    # 相机校准面板
+    calibration = _compute_calibration(ref_data['rgb_float'], src_rgb)
 
     return {
         **wb_params,
@@ -57,6 +63,7 @@ def analyze_color(ref_data: dict, src_data: Optional[dict] = None) -> dict:
         **rgb_curves,
         **color_grading,
         **vibrance_sat,
+        **calibration,
     }
 
 
@@ -146,9 +153,10 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
         else:
             hue_adj = 0
 
-        # 饱和度变化
+        # 饱和度变化：暖色用更大系数（肤色/橙黄差值往往绝对值小但视觉感知强）
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_adj = clamp(int(sat_delta * 260), -100, 100)
+        sat_mult  = 320 if bucket in WARM_BUCKETS else 260
+        sat_adj   = clamp(int(sat_delta * sat_mult), -100, 100)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
@@ -160,8 +168,6 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
 
     return params
 
-
-WARM_BUCKETS = {'Red', 'Orange', 'Yellow'}
 
 def _feature_hsl(ref_hsv: np.ndarray) -> dict:
     """模式A：从参考图提取HSL风格特征"""
@@ -321,6 +327,47 @@ def _estimate_white_balance_single(rgb_float: np.ndarray) -> dict:
     """单图模式：白平衡同样保持As Shot，不做推算"""
     return {
         'wb_confidence': 'as_shot',
+    }
+
+
+def _compute_calibration(ref_rgb: np.ndarray, src_rgb: Optional[np.ndarray]) -> dict:
+    """
+    推算相机校准面板参数（RedSaturation / GreenSaturation / BlueSaturation / ShadowTint）
+    Mode B：比较原图与参考图的 RGB 通道比值差异
+    Mode A：以参考图的通道偏差估算（中性图 R≈G≈B）
+    """
+    ref_r = float(ref_rgb[:, :, 0].mean())
+    ref_g = float(ref_rgb[:, :, 1].mean())
+    ref_b = float(ref_rgb[:, :, 2].mean())
+    ref_g = max(ref_g, 0.01)
+
+    if src_rgb is not None:
+        src_r = float(src_rgb[:, :, 0].mean())
+        src_g = float(src_rgb[:, :, 1].mean())
+        src_b = float(src_rgb[:, :, 2].mean())
+        src_g = max(src_g, 0.01)
+
+        # 各通道相对绿通道的比值差 → 校准饱和度
+        red_sat   = clamp(int((ref_r / ref_g - src_r / src_g) * 120), -30, 40)
+        blue_sat  = clamp(int((ref_b / ref_g - src_b / src_g) * 100), -25, 30)
+        green_sat = 0  # 绿通道作参考，不调整
+        # 阴影色调：R-B 差值的变化
+        shadow_tint = clamp(int((src_b / src_g - ref_b / ref_g) * 80), -15, 15)
+    else:
+        # Mode A：偏离中性（R=G=B）的程度
+        red_sat   = clamp(int((ref_r / ref_g - 1.0) * 100), -25, 35)
+        blue_sat  = clamp(int((ref_b / ref_g - 1.0) *  80), -20, 25)
+        green_sat = 0
+        shadow_tint = 0
+
+    return {
+        'ShadowTint':       shadow_tint,
+        'RedHue':           0,
+        'RedSaturation':    red_sat,
+        'GreenHue':         0,
+        'GreenSaturation':  green_sat,
+        'BlueHue':          0,
+        'BlueSaturation':   blue_sat,
     }
 
 

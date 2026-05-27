@@ -61,6 +61,14 @@ DEFAULT_PARAMS = {
     'ColorGradeShadowLum': 0,
     'ColorGradeHighlightLum': 0,
     'GrainAmount': 0,
+    # 相机校准面板
+    'ShadowTint':      0,
+    'RedHue':          0,
+    'RedSaturation':   0,
+    'GreenHue':        0,
+    'GreenSaturation': 0,
+    'BlueHue':         0,
+    'BlueSaturation':  0,
 }
 
 NEUTRAL_CURVE = [(0, 0), (64, 64), (128, 128), (192, 192), (255, 255)]

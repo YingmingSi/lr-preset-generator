@@ -261,7 +261,25 @@ def compute_corrections(rendered: np.ndarray, reference: np.ndarray, params: dic
     if abs(sat_err) > 0.03:
         sat_corr = int(-sat_err * 130 * 0.5)
         new_sat  = int(params.get('Saturation', 0)) + sat_corr
-        corrections['Saturation'] = max(-60, min(60, new_sat))
+        corrections['Saturation'] = max(-70, min(70, new_sat))
+
+    # 暖色（橙/红/黄）饱和度误差 → 修正各 HSL 分项
+    WARM_RANGES = {
+        'Orange': (15,  45, False),
+        'Red':    (345, 15, True),   # 跨 0°
+        'Yellow': (45,  75, False),
+    }
+    for bucket, (lo, hi, wrap) in WARM_RANGES.items():
+        s1 = _bucket_sat(r1, lo, hi, wrap)
+        s2 = _bucket_sat(r2, lo, hi, wrap)
+        if s1 is None or s2 is None:
+            continue
+        err = s1 - s2   # rendered 比 reference 低 → err < 0 → 需要加饱和
+        if abs(err) > 0.025:
+            key     = f'SaturationAdjustment{bucket}'
+            cur     = int(params.get(key, 0))
+            delta   = int(-err * 200 * 0.5)   # 50%步长
+            corrections[key] = max(-100, min(100, cur + delta))
 
     # 色调偏差（R vs B）→ 记录供报告使用
     r_diff = float(r2[:, :, 0].mean() - r1[:, :, 0].mean())
@@ -271,6 +289,19 @@ def compute_corrections(rendered: np.ndarray, reference: np.ndarray, params: dic
         corrections['_color_cast_note'] = direction
 
     return corrections
+
+
+def _bucket_sat(rgb: np.ndarray, h_lo: float, h_hi: float, wrap: bool) -> 'float | None':
+    """计算某色相范围内像素的均值饱和度"""
+    hsv = _rgb_to_hsv(rgb)
+    h, s = hsv[:, :, 0], hsv[:, :, 1]
+    if wrap:
+        mask = ((h >= h_lo) | (h < h_hi)) & (s > 0.08)
+    else:
+        mask = (h >= h_lo) & (h < h_hi) & (s > 0.08)
+    if mask.sum() < 30:
+        return None
+    return float(s[mask].mean())
 
 
 # ── 工具 ─────────────────────────────────────────────────────────────────────────
