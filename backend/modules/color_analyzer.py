@@ -161,6 +161,8 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
     return params
 
 
+WARM_BUCKETS = {'Red', 'Orange', 'Yellow'}
+
 def _feature_hsl(ref_hsv: np.ndarray) -> dict:
     """模式A：从参考图提取HSL风格特征"""
     params = {}
@@ -174,9 +176,12 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             params[f'LuminanceAdjustment{bucket}']  = 0
             continue
 
-        # 基线 0.25：典型 RAW 中性开发的有色像素饱和度（肤色/橙色约 0.25-0.32）
-        # 低于 0.35 的旧基线，避免人像橙色等低饱和色被误判为需要降饱和
-        sat_adj = clamp(int((stats['sat_mean'] - 0.25) * 260), -80, 80)
+        # 暖色（红/橙/黄）基线更低：肤色/暖调的 HSV 饱和度通常只有 0.20-0.32
+        # 冷色（绿/青/蓝/紫/品红）基线 0.28
+        if bucket in WARM_BUCKETS:
+            sat_adj = clamp(int((stats['sat_mean'] - 0.20) * 290), -80, 80)
+        else:
+            sat_adj = clamp(int((stats['sat_mean'] - 0.28) * 260), -80, 80)
 
         if stats['hue_mean'] is not None:
             hue_center = HUE_BUCKETS[bucket][0]
@@ -184,7 +189,7 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             # 红色桶跨越0°，修正偏移方向
             if bucket == 'Red' and abs(hue_offset) > 180:
                 hue_offset -= 360 if hue_offset > 0 else -360
-            hue_adj = clamp(int(hue_offset * 1.2), -50, 50)
+            hue_adj = clamp(int(hue_offset * 1.5), -60, 60)
         else:
             hue_adj = 0
 
@@ -290,11 +295,11 @@ def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndar
             src_mean_sat = float(src_sat_vals.mean())
         delta      = ref_mean_sat - src_mean_sat
         saturation = clamp(int(delta * 280), -80, 80)
-        vibrance   = clamp(int(delta * 300), -80, 80)
+        vibrance   = clamp(int(delta * 300) + 20, -80, 100)
     else:
         # 基准 0.38：有色像素的中性参考饱和度
         saturation = clamp(int((ref_mean_sat - 0.38) * 260), -75, 75)
-        vibrance   = clamp(int(saturation * 1.3), -75, 75)
+        vibrance   = clamp(int(saturation * 1.3) + 20, -75, 100)
 
     return {
         'Vibrance':   vibrance,
