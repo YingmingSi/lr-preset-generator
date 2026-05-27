@@ -52,8 +52,41 @@ export default function App() {
   const [error,       setError]       = useState(null);
   const [activeTab,   setActiveTab]   = useState("report");
 
+  // 风格模板库
+  const [libraryOpen,        setLibraryOpen]        = useState(false);
+  const [libraryStyles,      setLibraryStyles]      = useState(null);
+  const [uploadingPresets,   setUploadingPresets]   = useState(false);
+  const [uploadResult,       setUploadResult]       = useState(null);
+  const xmpInputRef = useRef();
+
   const refInputRef = useRef();
   const srcInputRef = useRef();
+
+  const loadLibrary = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/styles`);
+      const data = await res.json();
+      setLibraryStyles(data.styles || []);
+    } catch {}
+  };
+
+  const uploadPresets = async (files) => {
+    if (!files?.length) return;
+    setUploadingPresets(true);
+    setUploadResult(null);
+    const form = new FormData();
+    for (const f of files) form.append("preset_files", f);
+    try {
+      const res  = await fetch(`${API_BASE}/upload_presets`, { method: "POST", body: form });
+      const data = await res.json();
+      setUploadResult(data);
+      setLibraryStyles(data.library || []);
+    } catch (e) {
+      setUploadResult({ error: e.message });
+    } finally {
+      setUploadingPresets(false);
+    }
+  };
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -147,6 +180,9 @@ export default function App() {
               style={{ display: "none" }}
               onChange={e => handleFile(e.target.files[0], "src")} />
           </div>
+          <input ref={xmpInputRef} type="file" accept=".xmp" multiple
+            style={{ display: "none" }}
+            onChange={e => uploadPresets(Array.from(e.target.files))} />
 
           {/* Options row */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
@@ -213,6 +249,100 @@ export default function App() {
               </span>}
               {refSceneType !== "auto" && <span style={{ marginLeft: "16px", color: COLORS.accentDim }}>● 参考图：{SCENE_OPTIONS.find(o => o.value === refSceneType)?.label}</span>}
               {srcSceneType !== "auto" && <span style={{ marginLeft: "16px", color: COLORS.accentDim }}>● 原图：{SCENE_OPTIONS.find(o => o.value === srcSceneType)?.label}</span>}
+            </div>
+          )}
+        </section>
+
+        {/* Style Library */}
+        <section style={{ marginBottom: "24px", border: `1px solid ${COLORS.border}`, background: COLORS.surface }}>
+          <div
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", cursor: "pointer", userSelect: "none" }}
+            onClick={() => { const next = !libraryOpen; setLibraryOpen(next); if (next && !libraryStyles) loadLibrary(); }}
+          >
+            <div style={{ fontSize: "11px", letterSpacing: "0.14em", color: COLORS.textDim, fontFamily: "monospace" }}>
+              风格模板库
+              {libraryStyles && <span style={{ marginLeft: "10px", color: COLORS.textMuted }}>· {libraryStyles.length} 个模板</span>}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <button
+                onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
+                disabled={uploadingPresets}
+                style={{
+                  background: "none", border: `1px solid ${COLORS.accentDim}`,
+                  color: uploadingPresets ? COLORS.textMuted : COLORS.accentDim,
+                  padding: "4px 14px", fontSize: "10px", letterSpacing: "0.1em",
+                  fontFamily: "monospace", cursor: uploadingPresets ? "not-allowed" : "pointer",
+                }}
+              >
+                {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
+              </button>
+              <span style={{ color: COLORS.textMuted, fontSize: "11px", fontFamily: "monospace" }}>
+                {libraryOpen ? "▲" : "▼"}
+              </span>
+            </div>
+          </div>
+
+          {libraryOpen && (
+            <div style={{ borderTop: `1px solid ${COLORS.border}`, padding: "16px 20px" }}>
+              {uploadResult && (
+                <div style={{
+                  marginBottom: "14px", padding: "10px 14px",
+                  background: uploadResult.error ? "#1a0a0a" : "#0a1a0e",
+                  border: `1px solid ${uploadResult.error ? COLORS.error : COLORS.success}`,
+                  fontSize: "11px", fontFamily: "monospace",
+                }}>
+                  {uploadResult.error ? (
+                    <span style={{ color: "#e08080" }}>✗ {uploadResult.error}</span>
+                  ) : (
+                    <>
+                      <span style={{ color: COLORS.success }}>✓ 已处理 {uploadResult.imported} 个文件</span>
+                      {uploadResult.presets?.map((p, i) => (
+                        <div key={i} style={{ marginTop: "5px", color: COLORS.textMuted }}>
+                          <span style={{ color: COLORS.textDim }}>· {p.filename}</span>
+                          {p.action === 'added'       && <span style={{ color: COLORS.success,    marginLeft: "8px" }}>→ 新建原型「{p.name}」</span>}
+                          {p.action === 'merged'      && <span style={{ color: COLORS.accent,     marginLeft: "8px" }}>→ 合并至「{p.name}」（相似度 {Math.round((p.similarity||0)*100)}%）</span>}
+                          {p.action === 'merged_full' && <span style={{ color: COLORS.accentDim,  marginLeft: "8px" }}>→ 库已满，并入「{p.name}」</span>}
+                          {p.error                   && <span style={{ color: "#e08080",          marginLeft: "8px" }}>✗ {p.error}</span>}
+                          {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {libraryStyles ? (
+                libraryStyles.length > 0 ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px" }}>
+                    {libraryStyles.map(s => (
+                      <div key={s.key} style={{ padding: "10px 14px", background: COLORS.bg, border: `1px solid ${COLORS.border}` }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "4px" }}>
+                          <span style={{ fontSize: "11px", color: COLORS.text, fontFamily: "monospace" }}>{s.name}</span>
+                          <span style={{ fontSize: "9px", color: s.source === "builtin" ? COLORS.accentDim : COLORS.success, fontFamily: "monospace", letterSpacing: "0.06em" }}>
+                            {s.source === "builtin" ? "内置" : `用户 ×${s.count ?? 1}`}
+                          </span>
+                        </div>
+                        {s.tags?.length > 0 && (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "4px" }}>
+                            {s.tags.map(tag => (
+                              <span key={tag} style={{
+                                fontSize: "9px", padding: "1px 6px",
+                                background: "#1e1e1e", border: `1px solid ${COLORS.border}`,
+                                color: COLORS.textDim, fontFamily: "monospace",
+                              }}>{tag}</span>
+                            ))}
+                          </div>
+                        )}
+                        <div style={{ fontSize: "10px", color: COLORS.textMuted, fontFamily: "monospace", lineHeight: "1.4" }}>{s.desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: "12px", color: COLORS.textMuted, fontFamily: "monospace" }}>暂无预设</div>
+                )
+              ) : (
+                <div style={{ fontSize: "12px", color: COLORS.textMuted, fontFamily: "monospace" }}>加载中...</div>
+              )}
             </div>
           )}
         </section>
@@ -362,6 +492,7 @@ function ReportTab({ result }) {
         {result.is_raw_source          && <Row label="原图格式" value="RAW（高精度）" good />}
         {result.camera_note            && <Row label="相机补偿" value={result.camera_note} />}
         {result.curve_style            && <Row label="曲线风格" value={result.curve_style} />}
+        {result.matched_style          && <Row label="匹配模板" value={`${result.matched_style}（相似度 ${Math.round((result.style_similarity || 0) * 100)}%）`} />}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
