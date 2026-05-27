@@ -142,17 +142,17 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
         # 色相偏移
         if src_stats['hue_mean'] is not None and ref_stats['hue_mean'] is not None:
             hue_delta = ref_stats['hue_mean'] - src_stats['hue_mean']
-            hue_adj = clamp(int(hue_delta * 1.5), -100, 100)
+            hue_adj = clamp(int(hue_delta * 2.0), -100, 100)
         else:
             hue_adj = 0
 
         # 饱和度变化
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_adj = clamp(int(sat_delta * 190), -80, 80)
+        sat_adj = clamp(int(sat_delta * 220), -100, 100)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
-        lum_adj = clamp(int(val_delta * 170), -100, 100)
+        lum_adj = clamp(int(val_delta * 200), -100, 100)
 
         params[f'HueAdjustment{bucket}'] = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
@@ -168,13 +168,13 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
 
     for bucket, stats in bucket_stats.items():
         # 该色相在图中几乎不存在 → 无有效像素，不做调整
-        if stats['weight'] < 0.01:
+        if stats['weight'] < 0.005:
             params[f'HueAdjustment{bucket}']        = 0
             params[f'SaturationAdjustment{bucket}'] = 0
             params[f'LuminanceAdjustment{bucket}']  = 0
             continue
 
-        sat_adj = clamp(int((stats['sat_mean'] - 0.35) * 200), -65, 65)
+        sat_adj = clamp(int((stats['sat_mean'] - 0.35) * 230), -80, 80)
 
         if stats['hue_mean'] is not None:
             hue_center = HUE_BUCKETS[bucket][0]
@@ -182,11 +182,11 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             # 红色桶跨越0°，修正偏移方向
             if bucket == 'Red' and abs(hue_offset) > 180:
                 hue_offset -= 360 if hue_offset > 0 else -360
-            hue_adj = clamp(int(hue_offset * 0.8), -40, 40)
+            hue_adj = clamp(int(hue_offset * 1.2), -50, 50)
         else:
             hue_adj = 0
 
-        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 100), -50, 50)
+        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 130), -60, 60)
 
         params[f'HueAdjustment{bucket}']        = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj

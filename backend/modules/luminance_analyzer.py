@@ -143,7 +143,7 @@ def _diff_analysis(src_hist: np.ndarray, ref_hist: np.ndarray) -> dict:
     ref_std  = _hist_std(ref_hist)
     contrast = clamp((ref_std - src_std) / max(src_std, 0.01) * 150, -60, 60)
 
-    highlights = clamp(-zone_delta('highlights') * 100, -80, 20)
+    highlights = clamp(-zone_delta('highlights') * 100, -100, 20)
     shadows    = clamp(-zone_delta('shadows')    * 100, -20, 60)
     whites     = clamp( zone_delta('whites')     *  80, -50, 30)
     blacks     = clamp(-zone_delta('blacks')     *  80, -30, 30)
@@ -166,7 +166,7 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
 
     exposure   = clamp((mean - 0.45) * 1.0, -0.8, 0.8)
     contrast   = clamp((std - 0.25) / 0.25 * 60, -50, 50)
-    highlights = clamp((0.15 - zones['highlights'] - zones['whites']) * 300, -70, 20)
+    highlights = clamp((0.15 - zones['highlights'] - zones['whites']) * 300, -100, 20)
     shadows    = clamp((0.2 - zones['blacks'] - zones['shadows']) * 200, -20, 50)
     whites     = clamp((zones['whites'] - 0.05) * 300, -50, 30)
     blacks     = clamp((0.03 - zones['blacks']) * 300, -30, 30)
@@ -197,11 +197,11 @@ def _derive_tone_curve(ref_gray: np.ndarray, src_gray: Optional[np.ndarray] = No
         src_hist, _ = np.histogram(src_gray.flatten(), bins=256, range=(0.0, 1.0))
         src_hist     = src_hist.astype(np.float64) + 0.5
         src_cdf      = np.cumsum(src_hist) / src_hist.sum()
-        strength     = 0.55
+        strength     = 0.35
     else:
         # 假设原图为线性均匀分布
         src_cdf  = np.linspace(0.0, 1.0, 256)
-        strength = 0.45
+        strength = 0.30
 
     # 对每个输入亮度 i，找到参考图中对应百分位的输出亮度 j
     lut = np.zeros(256)
