@@ -180,7 +180,7 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
     }
 
 
-def _derive_tone_curve(gray: np.ndarray, num_points: int = 9) -> list:
+def _derive_tone_curve(gray: np.ndarray, num_points: int = 5) -> list:
     """
     从参考图推导色调曲线控制点
     使用分段亮度均值对比，避免CDF拉伸失真

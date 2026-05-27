@@ -49,13 +49,12 @@ def _load_raw(file_bytes: bytes, filename: str) -> dict:
 
     try:
         with rawpy.imread(tmp_path) as raw:
-            # 使用sRGB色彩空间输出，自动白平衡，16bit
+            # 使用sRGB色彩空间输出，相机白平衡，16bit
+            # 不设置no_auto_bright，使rawpy自动亮度校正与LR默认渲染一致
             rgb16 = raw.postprocess(
                 use_camera_wb=True,
                 output_color=rawpy.ColorSpace.sRGB,
                 output_bps=16,
-                no_auto_bright=True,
-                bright=1.0,
             )
         # 转换为8bit
         rgb8 = (rgb16 / 256).astype(np.uint8)

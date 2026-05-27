@@ -174,7 +174,7 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             params[f'LuminanceAdjustment{bucket}']  = 0
             continue
 
-        sat_adj = clamp(int((stats['sat_mean'] - 0.40) * 110), -50, 50)
+        sat_adj = clamp(int((stats['sat_mean'] - 0.40) * 150), -65, 65)
 
         if stats['hue_mean'] is not None:
             hue_center = HUE_BUCKETS[bucket][0]
@@ -308,19 +308,15 @@ def _estimate_vibrance_saturation(ref_hsv: np.ndarray, src_rgb: Optional[np.ndar
         src_hsv      = _rgb_to_hsv(src_rgb)
         src_mean_sat = float(src_hsv[:, :, 1].mean())
         delta        = ref_mean_sat - src_mean_sat
-        saturation   = clamp(int(delta * 160), -50, 50)
-        vibrance     = clamp(int(delta * 130), -50, 50)
+        saturation   = clamp(int(delta * 200), -65, 65)
+        vibrance     = clamp(int(delta * 170), -65, 65)
     else:
-        saturation = clamp(int((ref_mean_sat - 0.35) * 120), -50, 50)
-        if ref_sat_std < 0.15:
-            vibrance   = saturation
-            saturation = int(saturation * 0.7)
-        else:
-            vibrance = int(saturation * 0.8)
+        saturation = clamp(int((ref_mean_sat - 0.35) * 160), -60, 60)
+        vibrance   = clamp(int(saturation * 0.8), -60, 60)
 
     return {
-        'Vibrance':   clamp(vibrance,   -50, 50),
-        'Saturation': clamp(saturation, -50, 50),
+        'Vibrance':   vibrance,
+        'Saturation': saturation,
     }
 
 

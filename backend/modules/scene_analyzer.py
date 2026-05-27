@@ -357,10 +357,16 @@ def _claude_param_correction(image_bytes: bytes, params: dict, scene_info: dict)
 算法初步生成的Lightroom参数：
 {json.dumps(key_params, ensure_ascii=False, indent=2)}
 
+重要说明：以上参数是"相对调整量"，将被应用到一张中性/未调色的源图上，而不是当前这张参考图。
+参考图已经代表目标风格，参数的作用是让中性源图变成参考图的样子。
+因此：如果参考图橙色饱和度高，SaturationAdjustmentOrange应为正值（提升）；如果偏低，应为负值。
+请不要因为参考图本身看起来"已经很饱和"就把正值纠正为0或负值。
+
 请：
-1. 检查参数是否符合图片实际风格，指出明显不合理的参数
-2. 对不合理的参数给出修正建议
-3. 补充算法可能遗漏的风格特征
+1. 检查色相（Hue）参数是否方向正确（如参考图偏绿，绿色HueAdjustment应向黄/蓝方向偏移）
+2. 检查明度（Luminance）参数是否符合参考图的明暗风格
+3. 补充算法可能遗漏的风格特征（如胶片感颗粒、特定色调偏移）
+4. 不要修改饱和度（Saturation）参数，除非方向明显错误
 
 以JSON格式返回：
 {{
