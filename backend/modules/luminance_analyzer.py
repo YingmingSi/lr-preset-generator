@@ -37,6 +37,7 @@ def analyze_luminance(ref_data: dict, src_data: Optional[dict] = None) -> dict:
     """
     ref_gray = _to_grayscale(ref_data['rgb_float'])
     ref_hist = _compute_histogram(ref_gray)
+    src_is_raw = src_data.get('is_raw', False) if src_data else False
 
     if src_data is not None:
         src_gray = _to_grayscale(src_data['rgb_float'])
@@ -46,8 +47,13 @@ def analyze_luminance(ref_data: dict, src_data: Optional[dict] = None) -> dict:
         src_gray = None
         params = _feature_analysis(ref_hist)
 
+    # RAW 原图补偿：rawpy 渲染比 LR 默认开发暗约 0.5 EV，
+    # 导致算法高估曝光差值；同时降低曲线强度防止双重叠加。
+    if src_is_raw:
+        params['Exposure'] = round(clamp(params['Exposure'] - 0.5, -1.0, 1.0), 2)
+
     # 推导色调曲线（传入原图灰度以做 CDF 匹配）
-    tone_curve = _derive_tone_curve(ref_gray, src_gray)
+    tone_curve = _derive_tone_curve(ref_gray, src_gray, src_is_raw=src_is_raw)
     params['tone_curve'] = tone_curve
 
     # 识别曲线形状（仅用于报告）
@@ -182,7 +188,7 @@ def _feature_analysis(ref_hist: np.ndarray) -> dict:
 
 
 def _derive_tone_curve(ref_gray: np.ndarray, src_gray: Optional[np.ndarray] = None,
-                        num_points: int = 5) -> list:
+                        num_points: int = 5, src_is_raw: bool = False) -> list:
     """
     使用 CDF 直方图匹配推导色调曲线。
     Mode B（有原图）：将原图直方图映射到参考图分布，strength=0.55
@@ -197,7 +203,9 @@ def _derive_tone_curve(ref_gray: np.ndarray, src_gray: Optional[np.ndarray] = No
         src_hist, _ = np.histogram(src_gray.flatten(), bins=256, range=(0.0, 1.0))
         src_hist     = src_hist.astype(np.float64) + 0.5
         src_cdf      = np.cumsum(src_hist) / src_hist.sum()
-        strength     = 0.35
+        # RAW 原图的直方图本身偏暗，CDF 匹配会生成额外向上偏移的曲线，
+        # 与 Exposure 补偿叠加容易过曝；降低 strength 缓解。
+        strength     = 0.25 if src_is_raw else 0.35
     else:
         # 假设原图为线性均匀分布
         src_cdf  = np.linspace(0.0, 1.0, 256)

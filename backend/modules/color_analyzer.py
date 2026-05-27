@@ -155,18 +155,18 @@ def _diff_hsl(src_hsv: np.ndarray, ref_hsv: np.ndarray) -> dict:
 
         # 饱和度变化：暖色用更大系数（肤色/橙黄差值往往绝对值小但视觉感知强）
         sat_delta = ref_stats['sat_mean'] - src_stats['sat_mean']
-        sat_mult  = 320 if bucket in WARM_BUCKETS else 260
+        sat_mult  = 360 if bucket in WARM_BUCKETS else 300
         sat_adj   = clamp(int(sat_delta * sat_mult), -100, 100)
 
         # 明度变化
         val_delta = ref_stats['val_mean'] - src_stats['val_mean']
-        lum_adj = clamp(int(val_delta * 220), -100, 100)
+        lum_adj = clamp(int(val_delta * 240), -100, 100)
 
         params[f'HueAdjustment{bucket}'] = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
         params[f'LuminanceAdjustment{bucket}'] = lum_adj
 
-    return params
+    return _apply_directional_focus(params)
 
 
 def _feature_hsl(ref_hsv: np.ndarray) -> dict:
@@ -182,12 +182,12 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
             params[f'LuminanceAdjustment{bucket}']  = 0
             continue
 
-        # 暖色（红/橙/黄）基线更低：肤色/暖调的 HSV 饱和度通常只有 0.20-0.32
-        # 冷色（绿/青/蓝/紫/品红）基线 0.28
+        # 暖色（红/橙/黄）基线更低：肤色/暖调的 HSV 饱和度通常只有 0.18-0.32
+        # 冷色（绿/青/蓝/紫/品红）基线 0.26
         if bucket in WARM_BUCKETS:
-            sat_adj = clamp(int((stats['sat_mean'] - 0.20) * 290), -80, 80)
+            sat_adj = clamp(int((stats['sat_mean'] - 0.18) * 320), -80, 80)
         else:
-            sat_adj = clamp(int((stats['sat_mean'] - 0.28) * 260), -80, 80)
+            sat_adj = clamp(int((stats['sat_mean'] - 0.26) * 285), -80, 80)
 
         if stats['hue_mean'] is not None:
             hue_center = HUE_BUCKETS[bucket][0]
@@ -199,13 +199,13 @@ def _feature_hsl(ref_hsv: np.ndarray) -> dict:
         else:
             hue_adj = 0
 
-        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 150), -60, 60)
+        lum_adj = clamp(int((stats['val_mean'] - 0.5) * 170), -65, 65)
 
         params[f'HueAdjustment{bucket}']        = hue_adj
         params[f'SaturationAdjustment{bucket}'] = sat_adj
         params[f'LuminanceAdjustment{bucket}']  = lum_adj
 
-    return params
+    return _apply_directional_focus(params)
 
 
 def _derive_rgb_curves(ref_rgb: np.ndarray, src_rgb: Optional[np.ndarray] = None) -> dict:
@@ -330,6 +330,49 @@ def _estimate_white_balance_single(rgb_float: np.ndarray) -> dict:
     }
 
 
+def _apply_directional_focus(params: dict) -> dict:
+    """
+    对 HSL 调整结果进行方向性聚焦，避免"每个通道都动一点"的分散感。
+
+    规则：
+    · 饱和度：主导桶（|adj| ≥ 最大值 × 40%）→ ×1.7 放大
+              非主导正向小调整 → ×0.20 压缩（几乎清零）
+              非主导负向（降饱和） → ×0.40 保留（不完全抹去）
+    · 色相偏移：主导桶（|adj| ≥ 最大值 × 40%）→ ×1.5 放大
+               非主导 → ×0.30 压缩
+    · 明度：不做聚焦（亮度调整方向性弱，保留原值）
+    """
+    result = dict(params)
+
+    # ── 饱和度聚焦 ──────────────────────────────────────────────────────────
+    sat_vals = {b: params.get(f'SaturationAdjustment{b}', 0) for b in HUE_BUCKETS}
+    max_sat  = max((abs(v) for v in sat_vals.values()), default=0)
+    if max_sat >= 8:
+        threshold = max_sat * 0.40
+        for bucket, v in sat_vals.items():
+            key = f'SaturationAdjustment{bucket}'
+            if abs(v) >= threshold:
+                result[key] = clamp(int(v * 1.7), -100, 100)
+            elif v > 0:
+                result[key] = int(v * 0.20)   # 正向小值 → 近似清零
+            else:
+                result[key] = int(v * 0.40)   # 负向（降饱和）→ 保留部分
+
+    # ── 色相偏移聚焦 ─────────────────────────────────────────────────────────
+    hue_vals = {b: params.get(f'HueAdjustment{b}', 0) for b in HUE_BUCKETS}
+    max_hue  = max((abs(v) for v in hue_vals.values()), default=0)
+    if max_hue >= 5:
+        threshold = max_hue * 0.40
+        for bucket, v in hue_vals.items():
+            key = f'HueAdjustment{bucket}'
+            if abs(v) >= threshold:
+                result[key] = clamp(int(v * 1.5), -100, 100)
+            else:
+                result[key] = int(v * 0.30)
+
+    return result
+
+
 def _compute_calibration(ref_rgb: np.ndarray, src_rgb: Optional[np.ndarray]) -> dict:
     """
     推算相机校准面板参数（RedSaturation / GreenSaturation / BlueSaturation / ShadowTint）
@@ -348,15 +391,15 @@ def _compute_calibration(ref_rgb: np.ndarray, src_rgb: Optional[np.ndarray]) -> 
         src_g = max(src_g, 0.01)
 
         # 各通道相对绿通道的比值差 → 校准饱和度
-        red_sat   = clamp(int((ref_r / ref_g - src_r / src_g) * 120), -30, 40)
-        blue_sat  = clamp(int((ref_b / ref_g - src_b / src_g) * 100), -25, 30)
+        red_sat   = clamp(int((ref_r / ref_g - src_r / src_g) * 160), -40, 55)
+        blue_sat  = clamp(int((ref_b / ref_g - src_b / src_g) * 130), -35, 45)
         green_sat = 0  # 绿通道作参考，不调整
         # 阴影色调：R-B 差值的变化
-        shadow_tint = clamp(int((src_b / src_g - ref_b / ref_g) * 80), -15, 15)
+        shadow_tint = clamp(int((src_b / src_g - ref_b / ref_g) * 100), -20, 20)
     else:
         # Mode A：偏离中性（R=G=B）的程度
-        red_sat   = clamp(int((ref_r / ref_g - 1.0) * 100), -25, 35)
-        blue_sat  = clamp(int((ref_b / ref_g - 1.0) *  80), -20, 25)
+        red_sat   = clamp(int((ref_r / ref_g - 1.0) * 130), -30, 45)
+        blue_sat  = clamp(int((ref_b / ref_g - 1.0) * 110), -25, 35)
         green_sat = 0
         shadow_tint = 0
 
