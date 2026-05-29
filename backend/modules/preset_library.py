@@ -678,7 +678,6 @@ BUILTIN_STYLES: dict = {
 _seeded_styles: dict = {}
 _user_styles:   dict = {}
 
-_DATA_DIR_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # repo root / backend
 _SEEDED_PATH   = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'seeded_styles.json')
 
 
@@ -721,6 +720,13 @@ def save_user_styles() -> None:
     os.makedirs(_DATA_DIR, exist_ok=True)
     with open(_user_styles_path(), 'w', encoding='utf-8') as f:
         json.dump(_user_styles, f, ensure_ascii=False, indent=2)
+
+
+def save_seeded_styles() -> None:
+    """将 _seeded_styles（含 action_weights）写入 seeded_styles.json"""
+    os.makedirs(os.path.dirname(_SEEDED_PATH), exist_ok=True)
+    with open(_SEEDED_PATH, 'w', encoding='utf-8') as f:
+        json.dump(_seeded_styles, f, ensure_ascii=False, indent=2)
 
 
 def promote_to_seeded() -> dict:
@@ -925,9 +931,10 @@ def _find_closest_user(vec: np.ndarray) -> tuple:
 
 
 def _next_cluster_key() -> str:
-    existing = [k for k in _user_styles if k.startswith('u_')]
-    idx = len(existing)
-    while f'u_{idx}' in _user_styles:
+    # 同时避开 _user_styles 和 _seeded_styles 中的已有 key
+    all_keys = set(_user_styles.keys()) | set(_seeded_styles.keys())
+    idx = 0
+    while f'u_{idx}' in all_keys:
         idx += 1
     return f'u_{idx}'
 
@@ -1139,7 +1146,7 @@ def decompose_seeded_styles() -> dict:
         _seeded_styles[key]['action_r2'] = round(r2, 3)
         report[key] = {'weights': len(weights), 'r2': r2}
 
-    save_user_styles()  # seeded 也存在这个文件
+    save_seeded_styles()   # action_weights 写入 seeded_styles.json，重启后仍有效
     return report
 
 

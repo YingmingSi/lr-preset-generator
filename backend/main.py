@@ -46,6 +46,19 @@ load_user_styles()
 load_calibration()
 load_learned()
 
+def _ensure_style_weights() -> None:
+    """补全 seeded_styles 中缺失的 action_weights（兼容旧 seeded_styles.json）"""
+    import modules.preset_library as _pl
+    needs = any(
+        'action_weights' not in v
+        for v in _pl._seeded_styles.values()
+        if isinstance(v, dict) and 'params' in v
+    )
+    if needs:
+        decompose_seeded_styles()
+
+_ensure_style_weights()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -118,7 +131,7 @@ async def analyze(
             style_weights, style_r2 = get_style_action_weights(best_style_key)
             if style_weights:
                 action_weights = mix_weights_with_style_prior(
-                    action_weights, style_weights, style_alpha=0.3
+                    action_weights, style_weights, style_alpha=0.5
                 )
                 style_note = f"参考风格: {best_style_info.get('name', best_style_key)} ({round(best_style_sim*100)}%)"
 
