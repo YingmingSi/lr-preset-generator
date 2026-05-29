@@ -296,6 +296,7 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
     # 增量少量上传：残差 PCA（只补充现有基底覆盖不到的新方向）
     learned_new = {}
     if is_bulk:
+        reset_learned()                          # 清除旧残差动作（基于旧基底，已失效）
         derive_user_actions(params_batch)        # 全量 PCA → user_actions.json
     elif len(params_batch) >= 3:
         learned_new = learn_from_uploads(        # 残差 PCA → 仅补充新方向
