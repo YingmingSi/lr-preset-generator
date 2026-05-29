@@ -48,8 +48,8 @@ def analyze_color(ref_data: dict, src_data: Optional[dict] = None) -> dict:
     # 色调曲线RGB分量
     rgb_curves = _derive_rgb_curves(ref_data['rgb_float'], src_rgb)
 
-    # 颜色分级（阴影/高光对立色）
-    color_grading = _analyze_color_grading(ref_data['rgb_float'])
+    # 颜色分级：双图模式用差值（ref 相对 src 的色调偏移），单图用参考图绝对值
+    color_grading = _analyze_color_grading_diff(ref_data['rgb_float'], src_rgb)
 
     # 整体饱和度/自然饱和度
     vibrance_sat = _estimate_vibrance_saturation(ref_hsv, src_rgb)
@@ -232,49 +232,93 @@ def _enforce_monotone(points: list) -> list:
 
 
 def _analyze_color_grading(rgb_float: np.ndarray) -> dict:
-    """
-    分析颜色分级（阴影和高光的对立色倾向）
-    """
-    gray = 0.2126 * rgb_float[:, :, 0] + 0.7152 * rgb_float[:, :, 1] + 0.0722 * rgb_float[:, :, 2]
+    """单图模式：从参考图本身估算颜色分级（精度较低，备用）"""
+    return _analyze_color_grading_diff(rgb_float, None)
 
-    # 阴影区域（亮度0-33%）
-    shadow_mask = gray < 0.33
-    # 高光区域（亮度67-100%）
-    highlight_mask = gray > 0.67
-    # 中间调（33-67%）
-    midtone_mask = (gray >= 0.33) & (gray <= 0.67)
 
-    def zone_color(mask):
+def _analyze_color_grading_diff(ref_rgb: np.ndarray,
+                                  src_rgb: Optional[np.ndarray]) -> dict:
+    """
+    颜色分级分析。
+
+    双图模式（src_rgb 不为 None）：
+        计算 ref 与 src 各区域的色调差值 → 真正需要 SplitToning 施加的量。
+        公式：对每个区域取 ref_mean_rgb - src_mean_rgb，
+              将差值向量转为 Hue + Saturation。
+
+    单图模式：从 ref 绝对色调估算（精度较低）。
+    """
+    def _gray(img):
+        return 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
+
+    ref_gray = _gray(ref_rgb)
+    shadow_mask    = ref_gray < 0.33
+    highlight_mask = ref_gray > 0.67
+    midtone_mask   = (ref_gray >= 0.33) & (ref_gray <= 0.67)
+
+    def _diff_hue_sat(mask, scale=1.8):
+        """计算 ref-src 在区域内的颜色偏移，映射到 (hue, saturation)"""
         if mask.sum() < 100:
             return 0, 0
-        r = float(rgb_float[:, :, 0][mask].mean())
-        g = float(rgb_float[:, :, 1][mask].mean())
-        b = float(rgb_float[:, :, 2][mask].mean())
-        h, s, v = colorsys.rgb_to_hsv(r, g, b)
-        return int(h * 360), int(s * 100)
+        ref_mean = np.array([ref_rgb[:, :, c][mask].mean() for c in range(3)])
+        if src_rgb is not None:
+            src_mean = np.array([src_rgb[:, :, c][mask].mean() for c in range(3)])
+            delta    = ref_mean - src_mean          # 需要"加入"多少色彩
+        else:
+            delta = ref_mean - ref_mean.mean()      # 单图：相对中性基准
 
-    shadow_hue, shadow_sat = zone_color(shadow_mask)
-    highlight_hue, highlight_sat = zone_color(highlight_mask)
-    midtone_hue, midtone_sat = zone_color(midtone_mask)
+        # delta → hue + saturation（笛卡尔 → 极坐标近似）
+        r_d, g_d, b_d = float(delta[0]), float(delta[1]), float(delta[2])
+        # 将 delta 解释为带符号的 RGB 色调偏移
+        # 橙色: R↑ G↑ B↓, 蓝色: R↓ G↓ B↑, 绿色: G↑ R↓ B↓
+        warm_score = r_d * 0.6 + g_d * 0.2 - b_d * 0.8   # 正 = 偏暖
+        cool_score = b_d * 0.8 + g_d * 0.1 - r_d * 0.7   # 正 = 偏冷
 
-    # 验证是否构成对立色关系
-    hue_diff = abs(shadow_hue - highlight_hue)
-    is_complementary = 150 < hue_diff < 210
+        if abs(warm_score) < 0.005 and abs(cool_score) < 0.005:
+            return 0, 0
 
-    # 如果不是对立色，降低颜色分级强度
-    sat_scale = 1.0 if is_complementary else 0.5
+        # 选主方向，映射到 Lightroom SplitToning 典型色相角
+        if warm_score > cool_score and warm_score > 0:
+            # 偏橙暖（约 30-50°）
+            green_component = max(0.0, g_d - r_d * 0.5)
+            hue = int(38 + green_component * 600)   # 纯橙38°，偏黄则角度↑
+            hue = max(15, min(65, hue))
+            strength = warm_score
+        elif cool_score > warm_score and cool_score > 0:
+            # 偏蓝青冷（约 185-230°）
+            hue = int(210 - (g_d - b_d * 0.3) * 500)   # 纯蓝210°，偏青则角度↓
+            hue = max(170, min(255, hue))
+            strength = cool_score
+        elif r_d > 0.01 and g_d < -0.005:
+            hue = 0    # 红调
+            strength = abs(r_d)
+        elif g_d > 0.01 and r_d < 0 and b_d < 0:
+            hue = 120  # 绿调
+            strength = abs(g_d)
+        else:
+            return 0, 0
+
+        sat = min(35, int(strength * scale * 600))
+        return hue, sat
+
+    shadow_hue,    shadow_sat    = _diff_hue_sat(shadow_mask,    scale=1.8)
+    highlight_hue, highlight_sat = _diff_hue_sat(highlight_mask, scale=1.5)
+    midtone_hue,   midtone_sat   = _diff_hue_sat(midtone_mask,   scale=0.8)
+
+    hue_diff        = abs(shadow_hue - highlight_hue) if shadow_sat > 0 and highlight_sat > 0 else 0
+    is_complementary = 100 < hue_diff < 250
 
     return {
-        'SplitToningShadowHue':          shadow_hue,
-        'SplitToningShadowSaturation':   int(shadow_sat * 0.4 * sat_scale),
-        'SplitToningHighlightHue':       highlight_hue,
-        'SplitToningHighlightSaturation': int(highlight_sat * 0.4 * sat_scale),
-        'SplitToningBalance':            0,
-        'ColorGradeMidtoneHue':          midtone_hue,
-        'ColorGradeMidtoneSat':          int(midtone_sat * 0.2),
-        'ColorGradeShadowLum':           0,
-        'ColorGradeHighlightLum':        0,
-        'is_complementary_grading':      is_complementary,  # 供报告使用
+        'SplitToningShadowHue':           shadow_hue,
+        'SplitToningShadowSaturation':    shadow_sat,
+        'SplitToningHighlightHue':        highlight_hue,
+        'SplitToningHighlightSaturation': highlight_sat,
+        'SplitToningBalance':             0,
+        'ColorGradeMidtoneHue':           midtone_hue,
+        'ColorGradeMidtoneSat':           midtone_sat,
+        'ColorGradeShadowLum':            0,
+        'ColorGradeHighlightLum':         0,
+        'is_complementary_grading':       is_complementary,
     }
 
 

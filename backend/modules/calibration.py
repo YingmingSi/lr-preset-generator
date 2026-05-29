@@ -166,9 +166,9 @@ def apply_calibration(params: dict) -> dict:
 
         fval = float(val)
         if fval < lo:
-            fval = lo + (fval - lo) * 0.4   # 向 lo 收缩，保留 40% 超量
+            fval = lo + (fval - lo) * 0.7   # 保留 70% 超量（宽松截断）
         elif fval > hi:
-            fval = hi + (fval - hi) * 0.4   # 向 hi 收缩，保留 40% 超量
+            fval = hi + (fval - hi) * 0.7   # 保留 70% 超量
 
         result[key] = int(round(fval)) if isinstance(val, int) else round(fval, 3)
 

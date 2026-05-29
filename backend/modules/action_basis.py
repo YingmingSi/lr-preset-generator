@@ -298,17 +298,20 @@ def compose(weights: dict, raw_params: dict, r2: float = 0.5) -> dict:
     """
     按动作权重重建 LR 参数，并与原始分析结果自适应混合。
 
-    混合权重（raw_alpha）基于分解质量 r2：
-      r2 > 0.70 → raw 25%，动作重建 75%（动作覆盖好）
-      r2 > 0.40 → 各 50%
-      r2 ≤ 0.40 → raw 75%（动作覆盖弱，保留原始分析）
+    raw_alpha 决定「原始图像分析」在最终结果中的占比：
+      越高 = 越忠实于图像差值，越低 = 越受动作基底风格化影响。
+
+    动作基底的价值在于「填补分析盲区」（弱信号参数），
+    而非覆盖强信号分析——因此 raw_alpha 应偏高，以保证还原精度。
     """
     A, keys  = _get_matrix()
     w_vec    = np.array([weights.get(k, 0.0) for k in keys], dtype=np.float64)
     recon    = A @ w_vec
     raw_vec  = _to_vec(raw_params)
 
-    raw_alpha = 0.25 if r2 > 0.70 else (0.50 if r2 > 0.40 else 0.75)
+    # 原始分析信号占 70%（当 R² 高时动作基底与分析方向基本一致，混合影响小）
+    # R² 低时说明当前风格不在训练分布内，更应信任原始分析
+    raw_alpha = 0.70 if r2 > 0.70 else (0.80 if r2 > 0.40 else 0.90)
     blended  = raw_vec * raw_alpha + recon * (1.0 - raw_alpha)
 
     result = dict(raw_params)

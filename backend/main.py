@@ -124,17 +124,12 @@ async def analyze(
                         **scene_result.get('params', {})}
         action_weights, action_r2 = action_decompose(raw_combined)
 
-        # 找最近 seeded_style，用其动作权重作为先验
+        # 风格先验：仅用于诊断展示，不参与参数计算
+        # （先验混合会将分析结果向用户历史风格偏移，牺牲还原精度）
         best_style_key, best_style_sim, best_style_info = find_closest_seeded_style(raw_combined)
-        style_weights = {}
         style_note = ""
         if best_style_key and best_style_sim > 0.50:
-            style_weights, style_r2 = get_style_action_weights(best_style_key)
-            if style_weights:
-                action_weights = mix_weights_with_style_prior(
-                    action_weights, style_weights, style_alpha=0.5
-                )
-                style_note = f"参考风格: {best_style_info.get('name', best_style_key)} ({round(best_style_sim*100)}%)"
+            style_note = f"参考风格: {best_style_info.get('name', best_style_key)} ({round(best_style_sim*100)}%)"
 
         composed = action_compose(action_weights, raw_combined, r2=action_r2)
         # 将合成结果写回（HSL + 亮度均更新）
