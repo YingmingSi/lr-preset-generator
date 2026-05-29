@@ -48,72 +48,74 @@ def parse_xmp_params(xmp_content: str) -> dict:
 
 def _auto_tags(params: dict) -> list:
     """
-    从参数特征生成语义标签列表。
-
-    设计原则：
-    · 色调方向用「各方向最大正向值」而非均值，避免被零值通道稀释
-      （Orange=25, Red=0, Yellow=0 → warm_max=25，而非均值 8.3）
-    · 青橙判断：Orange 和 Aqua 同时为正，且都不低于全局最大绝对值的 20%
-    · 阈值相对化，适配真实用户预设（幅度 10–40）而非内置样本（70–90）
+    同时识别正向（提升）和负向（压制）的参数特征。
+    适配真实调色习惯：压饱和、压高光等负向操作同样产生有意义的标签。
     """
     sat = {b: float(params.get(f'SaturationAdjustment{b}', 0)) for b in BUCKETS}
+    highlights  = float(params.get('Highlights', 0))
+    shadows     = float(params.get('Shadows',    0))
+    blacks      = float(params.get('Blacks',     0))
+    contrast    = float(params.get('Contrast',   0))
+    overall_sat = float(params.get('Saturation', 0))
 
-    # 各方向最大正向提升值（负值归零，不污染方向判断）
-    warm_max  = max(sat['Red'],  sat['Orange'], sat['Yellow'], 0)
-    cool_max  = max(sat['Aqua'], sat['Blue'],   sat['Purple'], 0)
-    green_max = max(sat['Green'], 0)
-
-    # 全局最大绝对值（衡量整体调整强度）
-    all_max    = max((abs(v) for v in sat.values()), default=0)
-    orange_sat = sat['Orange']
-    aqua_sat   = sat['Aqua']
-    overall    = float(params.get('Saturation',  0))
-    blacks     = float(params.get('Blacks',       0))
-    shadows    = float(params.get('Shadows',      0))
-    contrast   = float(params.get('Contrast',     0))
-    highlights = float(params.get('Highlights',   0))
+    # 各通道的正向/负向强度
+    warm_up   = max(sat['Orange'], sat['Red'],  sat['Yellow'], 0)
+    cool_up   = max(sat['Aqua'],   sat['Blue'], sat['Purple'], 0)
+    warm_down = max(-sat['Orange'],-sat['Red'], -sat['Yellow'], 0)
+    cool_down = max(-sat['Aqua'],  -sat['Blue'], 0)
+    green_down= max(-sat['Green'], 0)
 
     tags = []
 
-    # ── 色调方向 ──────────────────────────────────────────────────────────
-    # 最低有效阈值 8：低于此视为噪声，不作方向判断
-    MIN_SAT = 8
-    if warm_max >= MIN_SAT or cool_max >= MIN_SAT or green_max >= MIN_SAT:
-        dominant = max(warm_max, cool_max, green_max)
-        sig = dominant * 0.20   # 次方向至少达到主方向 20% 才算"共同存在"
+    # ── 色调方向（提升方向）──────────────────────────────────────────────
+    if sat['Orange'] > 10 and sat['Aqua'] > 8:
+        tags.append('青橙')
+    elif warm_up > 10:
+        tags.append('暖色')
+    elif cool_up > 8:
+        tags.append('冷调')
+    elif warm_down > cool_down + 12 and warm_down > 15:
+        tags.append('冷感')      # 压暖多于压冷 → 相对冷色倾向
+    elif cool_down > warm_down + 12 and cool_down > 15:
+        tags.append('暖感')      # 压冷多于压暖 → 相对暖色倾向
 
-        # 青橙：橙色和青色都是正向，且都足够显著
-        if orange_sat >= max(sig, MIN_SAT) and aqua_sat >= max(sig, MIN_SAT):
-            tags.append('青橙')
-        elif warm_max >= cool_max and warm_max >= green_max:
-            tags.append('暖色')
-        elif cool_max > warm_max and cool_max >= green_max:
-            tags.append('冷调')
+    # ── 色彩抑制特征 ────────────────────────────────────────────────────
+    if green_down > 35:
+        tags.append('压绿')
+    if sat['Yellow'] < -30 and sat['Orange'] < -20:
+        tags.append('压黄橙')
+    if sat['Blue'] < -25 and sat['Aqua'] < -18:
+        tags.append('压蓝青')
+    if sat['Red'] < -20:
+        tags.append('压红')
 
-        # 绿色独立主导时打标
-        if green_max >= MIN_SAT and green_max > warm_max * 1.2 and green_max > cool_max * 1.2:
-            tags.append('自然绿')
+    # ── 影调 ────────────────────────────────────────────────────────────
+    if highlights < -55:
+        tags.append('强压高光')
+    elif highlights < -25:
+        tags.append('压高光')
 
-    # ── 整体去饱和 ────────────────────────────────────────────────────────
-    neg_count = sum(1 for v in sat.values() if v < -8)
-    if overall < -10 or (neg_count >= 5 and all_max < 20):
-        tags.append('低饱和')
-    elif overall > 15 or all_max >= 35:
-        tags.append('高饱和')
-
-    # ── 影调风格（独立判断，不互斥；_auto_name 中按优先级选主标签）────────
-    if blacks < -22 and contrast > 22:
+    if blacks < -25 and contrast > 20:
         tags.append('电影感')
-    if blacks > 12 or (shadows > 22 and contrast < -8):
+    elif blacks > 12 or (shadows > 20 and contrast < -10):
         tags.append('胶片感')
-    if shadows > 32 and contrast < -15:
+
+    if shadows > 30 and contrast < -15:
         tags.append('日系')
 
-    # ── 反差 ──────────────────────────────────────────────────────────────
-    if contrast > 38:
+    # ── 反差 ────────────────────────────────────────────────────────────
+    if contrast > 35:
         tags.append('高对比')
-    elif highlights < -15 and shadows > 10:
+    elif contrast < -20 or (highlights < -30 and shadows > 5):
         tags.append('低反差')
+
+    # ── 全局饱和度 ────────────────────────────────────────────────────
+    neg_heavy = sum(1 for v in sat.values() if v < -18)
+    pos_heavy = sum(1 for v in sat.values() if v > 15)
+    if overall_sat < -8 or neg_heavy >= 4:
+        tags.append('低饱和')
+    elif overall_sat > 12 or pos_heavy >= 3:
+        tags.append('高饱和')
 
     if not tags:
         tags.append('中性')
@@ -122,19 +124,53 @@ def _auto_tags(params: dict) -> list:
 
 
 def _auto_name(params: dict) -> str:
+    """
+    根据参数特征生成描述性名称，覆盖正向和负向调整。
+    生成的名称不保证全局唯一——batch_cluster 负责在结果中去重。
+    """
     tags = _auto_tags(params)
-    if '青橙'   in tags:                            return '青橙'
-    if '电影感' in tags and '暖色' in tags:          return '暖调电影'
-    if '电影感' in tags:                             return '暗调电影'
-    if '日系'   in tags:                            return '日系清新'
-    if '胶片感' in tags and '暖色' in tags:          return '暖调胶片'
-    if '胶片感' in tags:                             return '胶片复古'
-    if '低饱和' in tags and '暖色' in tags:          return '日系暖调'
-    if '低饱和' in tags:                             return '低饱和淡雅'
-    if '自然绿' in tags:                             return '清新自然'
-    if '高饱和' in tags and '暖色' in tags:          return '暖色鲜艳'
-    if '冷调'   in tags:                            return '冷调风格'
-    if '暖色'   in tags:                            return '暖调风格'
+    hl  = float(params.get('Highlights', 0))
+    ct  = float(params.get('Contrast',   0))
+    bk  = float(params.get('Blacks',     0))
+    sh  = float(params.get('Shadows',    0))
+    sat_o = float(params.get('SaturationAdjustmentOrange', 0))
+    sat_g = float(params.get('SaturationAdjustmentGreen',  0))
+    sat_b = float(params.get('SaturationAdjustmentBlue',   0))
+    sat_y = float(params.get('SaturationAdjustmentYellow', 0))
+
+    # ── 优先规则：色调方向明确时直接命名 ─────────────────────────────────
+    if '青橙'   in tags:                              return '青橙'
+    if '电影感' in tags and '暖色'  in tags:           return '暖调电影'
+    if '电影感' in tags:                               return '暗调电影'
+    if '日系'   in tags:                              return '日系清新'
+    if '胶片感' in tags and '暖色'  in tags:           return '暖调胶片'
+    if '胶片感' in tags:                               return '胶片复古'
+    if '冷调'   in tags:                              return '冷调风格'
+    if '暖色'   in tags and '高饱和' in tags:          return '暖色鲜艳'
+    if '暖色'   in tags:                              return '暖调风格'
+
+    # ── 压制特征组合命名 ──────────────────────────────────────────────────
+    parts = []
+    # 影调
+    if '强压高光' in tags:          parts.append('强压高光')
+    elif '压高光' in tags:          parts.append('压高光')
+    if '低反差'   in tags:          parts.append('低反差')
+    elif '高对比' in tags:          parts.append('高对比')
+    if bk < -28 and '电影感' not in tags: parts.append('深黑')
+    if sh > 25 and '日系' not in tags:    parts.append('提阴影')
+
+    # 色彩
+    if '压绿'   in tags:            parts.append('压绿')
+    if '压黄橙' in tags:            parts.append('压黄')
+    if '压蓝青' in tags:            parts.append('压蓝')
+    if '冷感'   in tags:            parts.append('冷感')
+    if '暖感'   in tags:            parts.append('暖感')
+    if '低饱和' in tags and not parts: parts.append('低饱和')
+
+    if len(parts) >= 2:
+        return '·'.join(parts[:2])
+    elif len(parts) == 1:
+        return parts[0]
     return '自然调色'
 
 
@@ -851,19 +887,39 @@ def batch_cluster(params_list: list, filenames: list) -> list:
                 v = float(np.mean(vals))
                 avg[key] = round(v, 2) if key == 'Exposure' else int(round(v))
 
-        cluster_key            = _next_cluster_key()
-        cluster                = _make_cluster(avg, source='user')
-        cluster['count']       = count
+        cluster_key             = _next_cluster_key()
+        cluster                 = _make_cluster(avg, source='user')
+        cluster['count']        = count
         cluster['source_files'] = [filenames[i] for i in range(n) if labels[i] == cluster_idx]
         _user_styles[cluster_key] = cluster
         results.append({
             'cluster_key': cluster_key,
-            'name':        cluster['name'],
-            'tags':        cluster['tags'],
-            'desc':        cluster['desc'],
+            'params':      avg,
             'count':       count,
-            'action':      'kmeans',
         })
+
+    # ── 聚类名称去重（同名加数字后缀）────────────────────────────────────
+    name_count: dict = {}
+    for r in results:
+        key = r['cluster_key']
+        raw_name = _user_styles[key]['name']
+        name_count[raw_name] = name_count.get(raw_name, 0) + 1
+
+    name_seen: dict = {}
+    for r in results:
+        key = r['cluster_key']
+        raw_name = _user_styles[key]['name']
+        if name_count[raw_name] > 1:
+            name_seen[raw_name] = name_seen.get(raw_name, 0) + 1
+            unique_name = f'{raw_name}{name_seen[raw_name]}'
+            _user_styles[key]['name'] = unique_name
+            # desc 也同步
+            _user_styles[key]['desc'] = _user_styles[key]['desc'] or unique_name
+
+        r['name'] = _user_styles[key]['name']
+        r['tags'] = _user_styles[key]['tags']
+        r['desc'] = _user_styles[key]['desc']
+        r['action'] = 'kmeans'
 
     save_user_styles()
     return results
@@ -1026,10 +1082,10 @@ def add_user_preset_incremental(params: dict, filename: str) -> dict:
 
 def all_styles() -> dict:
     """
-    返回内置模板 + 固化风格 + 会话聚类的合并字典。
-    优先级：builtin < seeded < user（后者可覆盖同名 key）
+    返回固化风格 + 会话聚类的合并字典（不含手工内置风格）。
+    内置风格仅保留在 BUILTIN_STYLES 常量供动作分解兜底使用，不展示给用户。
     """
-    merged = dict(BUILTIN_STYLES)
+    merged = {}
 
     def _flatten(cluster: dict, source_tag: str) -> dict:
         return {**cluster['params'],
@@ -1199,12 +1255,7 @@ def list_styles() -> list:
         if key.startswith('_'):
             continue
         raw_source = s.get('_source', '')
-        if key in BUILTIN_STYLES:
-            source = 'builtin'
-        elif raw_source == 'seeded':
-            source = 'seeded'
-        else:
-            source = 'user'
+        source = 'seeded' if raw_source == 'seeded' else 'user'
         out.append({
             'key':    key,
             'name':   s.get('_name', key),
