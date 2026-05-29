@@ -23,8 +23,9 @@ SAT_KEYS = [f'SaturationAdjustment{b}' for b in BUCKETS]
 HUE_KEYS = [f'HueAdjustment{b}'        for b in BUCKETS]
 LUM_KEYS = [f'LuminanceAdjustment{b}'  for b in BUCKETS]
 
-MAX_USER_CLUSTERS = 12    # 用户聚类上限
-MERGE_THRESHOLD   = 0.88  # 余弦相似度超过此值时合并而非新建（提高防止过度聚合）
+MAX_USER_CLUSTERS   = 25   # 用户聚类上限
+MERGE_THRESHOLD     = 0.90  # 顺序模式：相似度超过此值才合并（越高越严格）
+BATCH_KMEANS_MIN    = 15   # 单次上传文件数达到此值时改用 K-means 批量聚类
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'presets')
 
@@ -704,6 +705,115 @@ def save_user_styles() -> None:
     os.makedirs(_DATA_DIR, exist_ok=True)
     with open(_user_styles_path(), 'w', encoding='utf-8') as f:
         json.dump(_user_styles, f, ensure_ascii=False, indent=2)
+
+
+def reset_user_styles() -> None:
+    """清空所有用户上传的聚类原型"""
+    global _user_styles
+    _user_styles = {}
+    path = _user_styles_path()
+    if os.path.exists(path):
+        os.remove(path)
+
+
+# ─── K-means 批量聚类 ─────────────────────────────────────────────────────────
+
+def _kmeans(X: np.ndarray, k: int, n_iter: int = 80) -> tuple:
+    """
+    简单 K-means++（纯 numpy，无外部依赖）。
+    返回 (labels, centers)，labels[i] 是第 i 个样本所属聚类。
+    """
+    n = X.shape[0]
+    k = min(k, n)
+
+    # K-means++ 初始化
+    rng = np.random.default_rng(42)
+    center_idx = [int(rng.integers(n))]
+    for _ in range(k - 1):
+        dists = np.array([
+            min(float(np.linalg.norm(X[i] - X[c])) for c in center_idx)
+            for i in range(n)
+        ])
+        probs = dists ** 2
+        total = probs.sum()
+        if total < 1e-12:
+            break
+        center_idx.append(int(rng.choice(n, p=probs / total)))
+    centers = X[center_idx].copy().astype(np.float64)
+
+    labels = np.zeros(n, dtype=int)
+    for _ in range(n_iter):
+        # 分配：计算每个样本到各中心的距离
+        diffs   = X[:, None, :] - centers[None, :, :]   # n × k × d
+        dists   = np.linalg.norm(diffs, axis=2)          # n × k
+        new_lbl = np.argmin(dists, axis=1)
+        if np.all(new_lbl == labels):
+            break
+        labels = new_lbl
+        # 更新中心
+        for j in range(k):
+            mask = labels == j
+            if mask.any():
+                centers[j] = X[mask].mean(axis=0)
+
+    return labels, centers
+
+
+def batch_cluster(params_list: list, filenames: list) -> list:
+    """
+    对大批量 XMP 参数使用 K-means 聚类，替换现有用户聚类。
+    k = min(n // 4, MAX_USER_CLUSTERS)，每个聚类至少 3 个文件。
+
+    返回每个新建聚类的摘要列表。
+    """
+    global _user_styles
+
+    n = len(params_list)
+    if n == 0:
+        return []
+
+    k = max(3, min(n // 4, MAX_USER_CLUSTERS))
+    vecs = np.array([_style_vector(p) for p in params_list], dtype=np.float64)
+
+    labels, _ = _kmeans(vecs, k)
+
+    # 清空旧的用户聚类
+    _user_styles = {ky: v for ky, v in _user_styles.items()
+                    if not ky.startswith('u_')}  # 保留非 u_ 开头的（如果有）
+
+    results = []
+    for cluster_idx in range(k):
+        mask = labels == cluster_idx
+        count = int(mask.sum())
+        if count == 0:
+            continue
+
+        # 聚类内参数取均值
+        cluster_params_list = [params_list[i] for i in range(n) if labels[i] == cluster_idx]
+        all_keys = set().union(*(p.keys() for p in cluster_params_list))
+        avg: dict = {}
+        for key in all_keys:
+            vals = [float(p[key]) for p in cluster_params_list if key in p]
+            if vals:
+                v = float(np.mean(vals))
+                avg[key] = round(v, 2) if key == 'Exposure' else int(round(v))
+
+        cluster_key            = _next_cluster_key()
+        cluster                = _make_cluster(avg, source='user')
+        cluster['count']       = count
+        cluster['source_files'] = [filenames[i] for i in range(n) if labels[i] == cluster_idx]
+        _user_styles[cluster_key] = cluster
+        results.append({
+            'cluster_key': cluster_key,
+            'name':        cluster['name'],
+            'tags':        cluster['tags'],
+            'desc':        cluster['desc'],
+            'count':       count,
+            'action':      'kmeans',
+        })
+
+    save_user_styles()
+    return results
 
 
 # ─── 聚类核心逻辑 ────────────────────────────────────────────────────────────

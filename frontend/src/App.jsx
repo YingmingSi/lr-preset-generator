@@ -102,6 +102,15 @@ export default function App() {
     } catch {}
   };
 
+  const resetUserStyles = async () => {
+    try {
+      const res  = await fetch(`${API_BASE}/styles/user`, { method: "DELETE" });
+      const data = await res.json();
+      setLibraryStyles(data.library || []);
+      setUploadResult(null);
+    } catch {}
+  };
+
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -285,18 +294,29 @@ export default function App() {
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
               {ALLOW_UPLOAD && (
-                <button
-                  onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
-                  disabled={uploadingPresets}
-                  style={{
-                    background: "none", border: `1px solid ${COLORS.accentDim}`,
-                    color: uploadingPresets ? COLORS.textMuted : COLORS.accentDim,
-                    padding: "4px 14px", fontSize: "10px", letterSpacing: "0.1em",
-                    fontFamily: "monospace", cursor: uploadingPresets ? "not-allowed" : "pointer",
-                  }}
-                >
-                  {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
-                </button>
+                <>
+                  <button
+                    onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
+                    disabled={uploadingPresets}
+                    style={{
+                      background: "none", border: `1px solid ${COLORS.accentDim}`,
+                      color: uploadingPresets ? COLORS.textMuted : COLORS.accentDim,
+                      padding: "4px 14px", fontSize: "10px", letterSpacing: "0.1em",
+                      fontFamily: "monospace", cursor: uploadingPresets ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
+                  </button>
+                  <button
+                    onClick={e => { e.stopPropagation(); if (window.confirm("清空所有用户上传的风格聚类？（内置风格保留）")) resetUserStyles(); }}
+                    title="清空用户上传的风格聚类，重新上传后会重新分类"
+                    style={{
+                      background: "none", border: `1px solid ${COLORS.error}`,
+                      color: COLORS.error, padding: "4px 10px",
+                      fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
+                    }}
+                  >重置</button>
+                </>
               )}
               <span style={{ color: COLORS.textMuted, fontSize: "11px", fontFamily: "monospace" }}>
                 {libraryOpen ? "▲" : "▼"}
@@ -318,14 +338,31 @@ export default function App() {
                   ) : (
                     <>
                       <span style={{ color: COLORS.success }}>✓ 已处理 {uploadResult.imported} 个文件</span>
+                      {uploadResult.cluster_mode && (
+                        <span style={{ color: COLORS.accent, marginLeft: "10px", fontSize: "10px" }}>
+                          · {uploadResult.cluster_mode}
+                        </span>
+                      )}
                       {uploadResult.presets?.map((p, i) => (
                         <div key={i} style={{ marginTop: "5px", color: COLORS.textMuted }}>
-                          <span style={{ color: COLORS.textDim }}>· {p.filename}</span>
-                          {p.action === 'added'       && <span style={{ color: COLORS.success,   marginLeft: "8px" }}>→ 新建原型「{p.name}」</span>}
-                          {p.action === 'merged'      && <span style={{ color: COLORS.accent,    marginLeft: "8px" }}>→ 合并至「{p.name}」（{Math.round((p.similarity||0)*100)}%）</span>}
-                          {p.action === 'merged_full' && <span style={{ color: COLORS.accentDim, marginLeft: "8px" }}>→ 库已满，并入「{p.name}」</span>}
-                          {p.error                   && <span style={{ color: "#e08080",         marginLeft: "8px" }}>✗ {p.error}</span>}
-                          {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
+                          {p.action === 'kmeans' ? (
+                            /* K-means 聚类摘要行 */
+                            <>
+                              <span style={{ color: COLORS.accent }}>● 「{p.name}」</span>
+                              <span style={{ marginLeft: "8px" }}>×{p.count} 个文件</span>
+                              {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
+                            </>
+                          ) : (
+                            /* 顺序合并行 */
+                            <>
+                              <span style={{ color: COLORS.textDim }}>· {p.filename}</span>
+                              {p.action === 'added'       && <span style={{ color: COLORS.success,   marginLeft: "8px" }}>→ 新建「{p.name}」</span>}
+                              {p.action === 'merged'      && <span style={{ color: COLORS.accent,    marginLeft: "8px" }}>→ 合并至「{p.name}」（{Math.round((p.similarity||0)*100)}%）</span>}
+                              {p.action === 'merged_full' && <span style={{ color: COLORS.accentDim, marginLeft: "8px" }}>→ 库满，并入「{p.name}」</span>}
+                              {p.error                   && <span style={{ color: "#e08080",         marginLeft: "8px" }}>✗ {p.error}</span>}
+                              {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
+                            </>
+                          )}
                         </div>
                       ))}
                       {uploadResult.learned_new?.length > 0 && (

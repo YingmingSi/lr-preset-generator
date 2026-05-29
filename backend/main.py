@@ -22,6 +22,7 @@ from modules.xmp_generator import generate_xmp, params_summary
 from modules.preset_renderer import render_and_validate
 from modules.preset_library import (
     load_user_styles, add_user_preset, list_styles, parse_xmp_params,
+    reset_user_styles, batch_cluster, BATCH_KMEANS_MIN,
 )
 from modules.calibration import (
     load_calibration, apply_calibration, is_calibrated,
@@ -223,40 +224,63 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
     """上传 XMP 预设文件（仅本地/管理员环境开放）"""
     if not UPLOAD_ENABLED:
         raise HTTPException(403, "预设上传在此部署环境中已禁用")
-    results       = []
-    params_batch  = []   # 收集所有解析出的参数，用于校准
 
+    # ── 解析所有文件 ──────────────────────────────────────────────────────────
+    parsed = []   # [{filename, params}]
     for f in preset_files:
         if not f.filename.lower().endswith('.xmp'):
             continue
-        content = (await f.read()).decode('utf-8', errors='ignore')
-
-        # 加入风格库
-        summary = add_user_preset(content, f.filename)
-        results.append(summary)
-
-        # 收集参数用于校准
-        params = parse_xmp_params(content)
+        content     = (await f.read()).decode('utf-8', errors='ignore')
+        params      = parse_xmp_params(content)
         if params:
-            params_batch.append(params)
+            parsed.append({'filename': f.filename, 'params': params})
 
-    # 更新校准范围 + 学习新动作
-    calib_report  = {}
-    learned_new   = {}
+    params_batch = [p['params'] for p in parsed]
+    filenames    = [p['filename'] for p in parsed]
+
+    # ── 风格聚类：批量用 K-means，少量用顺序合并 ──────────────────────────────
+    if len(parsed) >= BATCH_KMEANS_MIN:
+        cluster_results = batch_cluster(params_batch, filenames)
+        cluster_mode    = f"K-means ({len(parsed)} 个文件 → {len(cluster_results)} 个聚类)"
+        preset_summaries = cluster_results
+    else:
+        preset_summaries = []
+        for p in parsed:
+            # 临时把 content 重建供 add_user_preset 用（只需 filename + params）
+            summary = add_user_preset(
+                '\n'.join(f'crs:{k}="{v}"' for k, v in p['params'].items()),
+                p['filename']
+            )
+            preset_summaries.append(summary)
+        cluster_mode = f"顺序合并 ({len(parsed)} 个文件)"
+
+    # ── 更新校准范围 + 学习新动作 ─────────────────────────────────────────────
+    calib_report = {}
+    learned_new  = {}
     if params_batch:
         calib_report = update_from_params_list(params_batch)
         learned_new  = learn_from_uploads(params_batch)
 
     return JSONResponse({
         "success":        True,
-        "imported":       len(results),
-        "presets":        results,
+        "imported":       len(parsed),
+        "cluster_mode":   cluster_mode,
+        "presets":        preset_summaries,
         "library":        list_styles(),
         "calibration":    calib_summary(),
         "calib_updated":  len(calib_report),
         "actions":        get_action_info(),
         "learned_new":    [v.get('_label', k) for k, v in learned_new.items()],
     })
+
+
+@app.delete("/styles/user")
+async def delete_user_styles():
+    """清空所有用户上传的风格聚类（保留内置风格）"""
+    if not UPLOAD_ENABLED:
+        raise HTTPException(403, "此操作在生产环境中已禁用")
+    reset_user_styles()
+    return JSONResponse({"success": True, "library": list_styles()})
 
 
 @app.get("/styles")
