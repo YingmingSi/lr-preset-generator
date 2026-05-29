@@ -399,12 +399,13 @@ def promote_to_seeded() -> dict:
 
 
 def reset_user_styles() -> None:
-    """清空当前 session 的聚类（不影响已固化的 seeded_styles）"""
-    global _user_styles
-    _user_styles = {}
-    path = _user_styles_path()
-    if os.path.exists(path):
-        os.remove(path)
+    """清空所有用户风格：session 聚类 + 固化库，从头开始"""
+    global _user_styles, _seeded_styles
+    _user_styles   = {}
+    _seeded_styles = {}
+    for path in [_user_styles_path(), _SEEDED_PATH]:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 # ─── K-means 批量聚类 ─────────────────────────────────────────────────────────
@@ -501,31 +502,69 @@ def batch_cluster(params_list: list, filenames: list) -> list:
             'count':       count,
         })
 
-    # ── 聚类名称去重（同名加数字后缀）────────────────────────────────────
-    name_count: dict = {}
+    # ── 同名聚类合并（不编号，直接融为一个）────────────────────────────────
+    # 按匹配到的风格名称分组
+    name_groups: dict = {}
     for r in results:
-        key = r['cluster_key']
-        raw_name = _user_styles[key]['name']
-        name_count[raw_name] = name_count.get(raw_name, 0) + 1
+        name = _user_styles[r['cluster_key']]['name']
+        name_groups.setdefault(name, []).append(r)
 
-    name_seen: dict = {}
-    for r in results:
-        key = r['cluster_key']
-        raw_name = _user_styles[key]['name']
-        if name_count[raw_name] > 1:
-            name_seen[raw_name] = name_seen.get(raw_name, 0) + 1
-            unique_name = f'{raw_name}{name_seen[raw_name]}'
-            _user_styles[key]['name'] = unique_name
-            # desc 也同步
-            _user_styles[key]['desc'] = _user_styles[key]['desc'] or unique_name
+    merged_results = []
+    new_user_styles: dict = {}
 
-        r['name'] = _user_styles[key]['name']
-        r['tags'] = _user_styles[key]['tags']
-        r['desc'] = _user_styles[key]['desc']
-        r['action'] = 'kmeans'
+    for name, group in name_groups.items():
+        if len(group) == 1:
+            # 唯一名称，直接保留
+            r   = group[0]
+            key = r['cluster_key']
+            new_user_styles[key] = _user_styles[key]
+            merged_results.append({
+                'cluster_key': key,
+                'name':  name,
+                'tags':  _user_styles[key]['tags'],
+                'desc':  _user_styles[key]['desc'],
+                'count': r['count'],
+                'action': 'kmeans',
+            })
+        else:
+            # 多个同名聚类 → 加权合并为一个
+            total_count = sum(r['count'] for r in group)
+            # 收集所有文件的原始参数（按 count 加权）
+            all_p: list = []
+            all_files: list = []
+            for r in group:
+                ck = r['cluster_key']
+                cl = _user_styles[ck]
+                # 用 count 作为权重重复 params
+                for _ in range(r['count']):
+                    all_p.append(cl['params'])
+                all_files.extend(cl.get('source_files', []))
 
+            all_keys = set().union(*(p.keys() for p in all_p))
+            merged_avg: dict = {}
+            for mk in all_keys:
+                vals = [float(p.get(mk, 0)) for p in all_p]
+                v = float(np.mean(vals))
+                merged_avg[mk] = round(v, 2) if mk == 'Exposure' else int(round(v))
+
+            merged_key           = _next_cluster_key()
+            merged_cluster       = _make_cluster(merged_avg, source='user')
+            merged_cluster['count']        = total_count
+            merged_cluster['source_files'] = all_files
+            merged_cluster['name']         = name   # 保留匹配名称（无数字后缀）
+            new_user_styles[merged_key]    = merged_cluster
+            merged_results.append({
+                'cluster_key': merged_key,
+                'name':  name,
+                'tags':  merged_cluster['tags'],
+                'desc':  merged_cluster['desc'],
+                'count': total_count,
+                'action': 'kmeans_merged',
+            })
+
+    _user_styles = new_user_styles
     save_user_styles()
-    return results
+    return merged_results
 
 
 # ─── 聚类核心逻辑 ────────────────────────────────────────────────────────────

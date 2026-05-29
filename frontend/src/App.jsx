@@ -344,7 +344,7 @@ export default function App() {
                     }}
                   >固化</button>
                   <button
-                    onClick={e => { e.stopPropagation(); if (window.confirm("清空当前 session 的聚类？（已固化的风格不受影响）")) resetUserStyles(); }}
+                    onClick={e => { e.stopPropagation(); if (window.confirm("清空所有用户风格（固化库 + 当前会话）？此操作不可撤销。")) resetUserStyles(); }}
                     title="仅清空本次会话上传的聚类"
                     style={{
                       background: "none", border: `1px solid ${COLORS.error}`,
@@ -391,11 +391,12 @@ export default function App() {
                       )}
                       {uploadResult.presets?.map((p, i) => (
                         <div key={i} style={{ marginTop: "5px", color: COLORS.textMuted }}>
-                          {p.action === 'kmeans' ? (
+                          {(p.action === 'kmeans' || p.action === 'kmeans_merged') ? (
                             /* K-means 聚类摘要行 */
                             <>
                               <span style={{ color: COLORS.accent }}>● 「{p.name}」</span>
                               <span style={{ marginLeft: "8px" }}>×{p.count} 个文件</span>
+                              {p.action === 'kmeans_merged' && <span style={{ color: COLORS.textMuted, marginLeft: "6px", fontSize: "10px" }}>(已合并)</span>}
                               {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
                             </>
                           ) : (
