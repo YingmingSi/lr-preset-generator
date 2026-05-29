@@ -45,9 +45,9 @@ load_learned()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
         "https://lr-preset-generator.vercel.app",
     ],
+    allow_origin_regex=r"http://localhost:\d+",   # 允许本地任意端口
     allow_methods=["*"],
     allow_headers=["*"],
 )
