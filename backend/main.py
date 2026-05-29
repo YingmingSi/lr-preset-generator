@@ -21,7 +21,8 @@ from modules.camera_profiles import apply_camera_compensation, get_camera_descri
 from modules.xmp_generator import generate_xmp, params_summary
 from modules.preset_renderer import render_and_validate
 from modules.preset_library import (
-    load_user_styles, add_user_preset, list_styles, parse_xmp_params,
+    load_user_styles, add_user_preset, add_user_preset_incremental,
+    list_styles, parse_xmp_params,
     reset_user_styles, batch_cluster, BATCH_KMEANS_MIN, promote_to_seeded,
 )
 from modules.calibration import (
@@ -31,6 +32,7 @@ from modules.calibration import (
 from modules.action_basis import (
     load_learned, decompose as action_decompose, compose as action_compose,
     top_actions, learn_from_uploads, get_action_info, reset_learned,
+    derive_user_actions, has_user_actions,
 )
 
 # 上传接口开关：默认开启；Railway 生产环境设 DISABLE_PRESET_UPLOAD=true 关闭
@@ -238,28 +240,38 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
     params_batch = [p['params'] for p in parsed]
     filenames    = [p['filename'] for p in parsed]
 
-    # ── 风格聚类：批量用 K-means，少量用顺序合并 ──────────────────────────────
-    if len(parsed) >= BATCH_KMEANS_MIN:
-        cluster_results = batch_cluster(params_batch, filenames)
-        cluster_mode    = f"K-means ({len(parsed)} 个文件 → {len(cluster_results)} 个聚类)"
+    # ── 风格聚类 ──────────────────────────────────────────────────────────────
+    is_bulk = len(parsed) >= BATCH_KMEANS_MIN
+
+    if is_bulk:
+        # 批量首次建库：K-means 全局分组
+        cluster_results  = batch_cluster(params_batch, filenames)
+        cluster_mode     = f"批量 K-means ({len(parsed)} 个文件 → {len(cluster_results)} 个聚类)"
         preset_summaries = cluster_results
     else:
+        # 增量添加：严格阈值 0.95，新风格始终新建不强制合并
         preset_summaries = []
         for p in parsed:
-            # 临时把 content 重建供 add_user_preset 用（只需 filename + params）
-            summary = add_user_preset(
-                '\n'.join(f'crs:{k}="{v}"' for k, v in p['params'].items()),
-                p['filename']
-            )
+            summary = add_user_preset_incremental(p['params'], p['filename'])
             preset_summaries.append(summary)
-        cluster_mode = f"顺序合并 ({len(parsed)} 个文件)"
+        cluster_mode = f"增量模式 ({len(parsed)} 个文件，新风格独立保留)"
 
-    # ── 更新校准范围 + 学习新动作 ─────────────────────────────────────────────
+    # ── 更新校准范围 ─────────────────────────────────────────────────────────
     calib_report = {}
-    learned_new  = {}
     if params_batch:
         calib_report = update_from_params_list(params_batch)
-        learned_new  = learn_from_uploads(params_batch)
+
+    # ── 动作库更新 ────────────────────────────────────────────────────────────
+    # 批量首次建库 → 全量 PCA 推导新动作基底（取代手工内置动作）
+    # 增量少量上传 → 残差 PCA 补充新方向（最低 3 个文件即可触发）
+    learned_new = {}
+    if is_bulk:
+        derive_user_actions(params_batch)   # 全量 PCA → user_actions.json
+        learned_new = learn_from_uploads(params_batch)  # 残差补充
+    elif len(params_batch) >= 3:
+        learned_new = learn_from_uploads(
+            params_batch, min_samples=3, var_threshold=0.10
+        )
 
     return JSONResponse({
         "success":        True,
@@ -276,11 +288,24 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
 
 @app.post("/styles/seed")
 async def seed_styles():
-    """将当前 session 的 K-means 聚类固化为基础库（写入 seeded_styles.json）"""
+    """
+    固化当前学习状态：
+    · seeded_styles.json  — K-means 风格聚类（提交 git 后永久展示）
+    · user_actions.json   — PCA 动作基底（提交 git 后作为生成依据）
+    · calibration.json    — 参数范围约束（已自动更新）
+    """
     if not UPLOAD_ENABLED:
         raise HTTPException(403, "此操作在生产环境中已禁用")
-    result = promote_to_seeded()
-    return JSONResponse({**result, "library": list_styles()})
+    from modules.action_basis import save_user_actions, has_user_actions
+    style_result = promote_to_seeded()
+    if has_user_actions():
+        save_user_actions()   # 确保 user_actions.json 写入磁盘
+    return JSONResponse({
+        **style_result,
+        "user_actions_saved": has_user_actions(),
+        "library": list_styles(),
+        "actions": get_action_info(),
+    })
 
 
 @app.delete("/styles/user")

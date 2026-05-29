@@ -23,9 +23,10 @@ SAT_KEYS = [f'SaturationAdjustment{b}' for b in BUCKETS]
 HUE_KEYS = [f'HueAdjustment{b}'        for b in BUCKETS]
 LUM_KEYS = [f'LuminanceAdjustment{b}'  for b in BUCKETS]
 
-MAX_USER_CLUSTERS   = 25   # 用户聚类上限
-MERGE_THRESHOLD     = 0.90  # 顺序模式：相似度超过此值才合并（越高越严格）
-BATCH_KMEANS_MIN    = 15   # 单次上传文件数达到此值时改用 K-means 批量聚类
+MAX_USER_CLUSTERS      = 25   # K-means 批量模式上限
+MERGE_THRESHOLD        = 0.90  # 批量顺序模式合并阈值
+INCREMENTAL_THRESHOLD  = 0.95  # 增量模式合并阈值（更严格，保护新风格）
+BATCH_KMEANS_MIN       = 15   # ≥此数量用 K-means，否则走增量模式
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'presets')
 
@@ -974,6 +975,42 @@ def add_user_preset(xmp_content: str, filename: str) -> dict:
         'desc':     cluster['desc'],
         'tags':     cluster['tags'],
         'count':    cluster['count'],
+        'similarity': round(closest_sim, 3) if action != 'added' else None,
+    }
+
+
+def add_user_preset_incremental(params: dict, filename: str) -> dict:
+    """
+    增量添加单个预设（新风格保护模式）。
+
+    与 add_user_preset 的关键区别：
+    · 合并阈值更高（INCREMENTAL_THRESHOLD = 0.95），只合并几乎相同的预设
+    · 库满时不强制合并——新风格始终新建聚类，库容量允许动态扩展
+    · 这样后续上传的少量新风格不会被已有聚类"吞没"
+    """
+    vec = _style_vector(params)
+    closest_key, closest_sim = _find_closest_user(vec)
+
+    if closest_key is not None and closest_sim >= INCREMENTAL_THRESHOLD:
+        _merge_cluster(closest_key, params)
+        action     = 'merged'
+        target_key = closest_key
+    else:
+        # 相似度不够高 → 始终新建，不管库是否"已满"
+        target_key = _next_cluster_key()
+        _user_styles[target_key] = _make_cluster(params, source='user')
+        action    = 'added'
+        closest_sim = 0.0
+
+    save_user_styles()
+    cluster = _user_styles[target_key]
+    return {
+        'filename':   filename,
+        'action':     action,
+        'name':       cluster['name'],
+        'desc':       cluster['desc'],
+        'tags':       cluster['tags'],
+        'count':      cluster['count'],
         'similarity': round(closest_sim, 3) if action != 'added' else None,
     }
 

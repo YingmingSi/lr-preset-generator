@@ -27,8 +27,9 @@ TONE_KEYS = ['Exposure', 'Contrast', 'Highlights', 'Shadows', 'Whites', 'Blacks'
 # 参与分解的全部参数（顺序固定 = 向量维度）共 41 维
 PARAM_KEYS = SAT_KEYS + HUE_KEYS + LUM_KEYS + TONE_KEYS
 
-_DATA_DIR     = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
-_LEARNED_PATH = os.path.join(_DATA_DIR, 'learned_actions.json')
+_DATA_DIR          = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+_LEARNED_PATH      = os.path.join(_DATA_DIR, 'learned_actions.json')
+_USER_ACTIONS_PATH = os.path.join(_DATA_DIR, 'user_actions.json')
 
 # ─── 内置手工动作基底（12个，近似正交设计）────────────────────────────────────
 # 每个动作描述"以强度 1.0 应用时"的典型参数变化
@@ -160,7 +161,11 @@ BUILTIN_ACTIONS: dict = {
     },
 }
 
-# 运行时学习到的动作（从磁盘加载）
+# 三层动作存储：
+#   _user_actions   : 从上传 XMP 通过 PCA 推导，反映真实调色习惯（主力）
+#   _learned_actions: 残差 PCA 发现的补充动作（辅助）
+#   BUILTIN_ACTIONS : 无用户数据时的数学兜底
+_user_actions:    dict = {}
 _learned_actions: dict = {}
 
 # 动作矩阵缓存 (PARAM_KEYS维度 × n_actions)
@@ -175,6 +180,13 @@ def _to_vec(params: dict) -> np.ndarray:
 
 
 def _all_actions() -> dict:
+    """
+    动作选取优先级：
+    - 有 user_actions（用户 XMP 推导）→ user_actions + learned_actions
+    - 无 user_actions → BUILTIN_ACTIONS + learned_actions（兜底模式）
+    """
+    if _user_actions:
+        return {**_user_actions, **_learned_actions}
     return {**BUILTIN_ACTIONS, **_learned_actions}
 
 
@@ -290,6 +302,106 @@ def top_actions(weights: dict, n: int = 6, min_ratio: float = 0.04) -> list:
             'ratio':  round(float(w) / total, 3),
         })
     return result
+
+
+# ─── 从上传 XMP 推导用户动作基底（主 PCA）────────────────────────────────────
+
+def derive_user_actions(params_list: list,
+                         n_components: int = 16,
+                         min_var_ratio: float = 0.015) -> dict:
+    """
+    从上传的 XMP 参数中通过全量 PCA 推导用户动作基底。
+
+    与 learn_from_uploads 的区别：
+    · 这里做的是「全量 PCA」，直接用数据的主成分取代手工内置动作
+    · 每个成分的量级 = 数据在该方向的标准差（真实调色习惯的幅度，非夸张值）
+    · 每个成分也包含其负方向（让 NNLS 能表达反向调整）
+
+    生成的 user_actions.json 提交到 git 后，无需重新上传即可复用。
+    """
+    global _user_actions
+
+    if len(params_list) < 5:
+        return {}
+
+    X = np.array([_to_vec(p) for p in params_list], dtype=np.float64)
+    n, d = X.shape
+    k = min(n_components, n - 1, d)
+
+    X_mean    = X.mean(axis=0)
+    X_c       = X - X_mean
+    cov       = X_c.T @ X_c / max(n - 1, 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order     = np.argsort(eigvals)[::-1]
+    eigvals   = eigvals[order]
+    eigvecs   = eigvecs[:, order]
+    total_var = eigvals.sum()
+
+    user_acts: dict = {}
+    kept = 0
+    for i in range(k):
+        var_ratio = float(eigvals[i] / (total_var + 1e-12))
+        if var_ratio < min_var_ratio:
+            break
+
+        comp = eigvecs[:, i].copy()
+
+        # 量级 = 该方向的投影标准差（反映真实调整幅度）
+        proj_std = float(np.std(X_c @ comp))
+        if proj_std < 0.5:
+            continue
+        comp_scaled = comp * proj_std
+
+        # 主导参数方向
+        dom = int(np.argmax(np.abs(comp_scaled)))
+        if comp_scaled[dom] < 0:
+            comp_scaled = -comp_scaled
+
+        def _make_entry(vec, suffix_label):
+            entry = {}
+            for j, key in enumerate(PARAM_KEYS):
+                v = float(vec[j])
+                if abs(v) > 0.3:
+                    entry[key] = round(v, 2) if key == 'Exposure' else int(round(v))
+            entry['_label']     = f'{_describe_component(vec)}({suffix_label})'
+            entry['_var_ratio'] = round(var_ratio, 4)
+            entry['_from_xmp']  = True
+            return entry
+
+        # 正方向
+        user_acts[f'u_pca_{i}p'] = _make_entry(comp_scaled,  '+')
+        # 负方向（让 NNLS 能表达反向调整）
+        user_acts[f'u_pca_{i}n'] = _make_entry(-comp_scaled, '-')
+        kept += 1
+
+    if user_acts:
+        _user_actions = user_acts
+        _invalidate_cache()
+        save_user_actions()
+
+    return user_acts
+
+
+def save_user_actions() -> None:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    with open(_USER_ACTIONS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(_user_actions, f, ensure_ascii=False, indent=2)
+
+
+def load_user_actions() -> None:
+    global _user_actions
+    if os.path.exists(_USER_ACTIONS_PATH):
+        with open(_USER_ACTIONS_PATH, 'r', encoding='utf-8') as f:
+            _user_actions = json.load(f)
+        _invalidate_cache()
+
+
+def reset_user_actions() -> None:
+    global _user_actions
+    _user_actions = {}
+    _invalidate_cache()
+    if os.path.exists(_USER_ACTIONS_PATH):
+        os.remove(_USER_ACTIONS_PATH)
 
 
 # ─── 从上传 XMP 学习新动作（PCA 残差） ────────────────────────────────────────
@@ -409,11 +521,13 @@ def _describe_component(vec: np.ndarray) -> str:
 # ─── 持久化 ───────────────────────────────────────────────────────────────────
 
 def load_learned() -> None:
+    """加载残差 PCA 补充动作 + 用户 PCA 主动作"""
     global _learned_actions
     if os.path.exists(_LEARNED_PATH):
         with open(_LEARNED_PATH, 'r', encoding='utf-8') as f:
             _learned_actions = json.load(f)
         _invalidate_cache()
+    load_user_actions()
 
 
 def save_learned() -> None:
@@ -431,14 +545,25 @@ def reset_learned() -> None:
 
 
 def get_action_info() -> list:
-    """返回所有动作的概要信息（内置 + 学习），供前端展示"""
+    """返回所有动作的概要信息（三层），供前端展示"""
     actions = _all_actions()
-    return [
-        {
+    result  = []
+    for k, a in actions.items():
+        if _user_actions and k in _user_actions:
+            tier = 'user'    # XMP 推导
+        elif k in BUILTIN_ACTIONS:
+            tier = 'builtin'
+        else:
+            tier = 'learned'
+        result.append({
             'key':       k,
             'label':     a.get('_label', k),
-            'builtin':   k in BUILTIN_ACTIONS,
+            'tier':      tier,
             'var_ratio': a.get('_var_ratio'),
-        }
-        for k, a in actions.items()
-    ]
+            'from_xmp':  bool(a.get('_from_xmp')),
+        })
+    return result
+
+
+def has_user_actions() -> bool:
+    return bool(_user_actions)
