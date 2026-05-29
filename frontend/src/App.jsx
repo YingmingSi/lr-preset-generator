@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef } from "react";
 
-const API_BASE      = import.meta.env.VITE_API_URL    || "http://localhost:8000";
-const ALLOW_UPLOAD  = import.meta.env.VITE_ALLOW_UPLOAD === "true";
+const API_BASE      = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// 生产环境（Vercel）设 VITE_DISABLE_UPLOAD=true 隐藏上传入口；本地默认显示
+const ALLOW_UPLOAD  = import.meta.env.VITE_DISABLE_UPLOAD !== "true";
 
 const COLORS = {
   bg:          "#0a0a0a",
@@ -59,8 +60,7 @@ export default function App() {
   const [calibration,        setCalibration]        = useState(null);
   const [uploadingPresets,   setUploadingPresets]   = useState(false);
   const [uploadResult,       setUploadResult]       = useState(null);
-  const xmpInputRef    = useRef();
-  const importDataRef  = useRef();
+  const xmpInputRef = useRef();
 
   const refInputRef = useRef();
   const srcInputRef = useRef();
@@ -102,43 +102,6 @@ export default function App() {
     } catch {}
   };
 
-  const exportData = async () => {
-    try {
-      const res  = await fetch(`${API_BASE}/data/export`);
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement("a");
-      a.href     = url;
-      a.download = `lr_preset_data_${new Date().toISOString().slice(0,10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      alert("导出失败：" + e.message);
-    }
-  };
-
-  const importData = async (file) => {
-    if (!file) return;
-    try {
-      const text    = await file.text();
-      const payload = JSON.parse(text);
-      const res     = await fetch(`${API_BASE}/data/import`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (data.success) {
-        await loadLibrary();
-        setUploadResult({ _import: true, summary: data.summary });
-        setLibraryOpen(true);
-      } else {
-        alert("导入出错：" + data.errors?.join(", "));
-      }
-    } catch (e) {
-      alert("导入失败：" + e.message);
-    }
-  };
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -232,14 +195,11 @@ export default function App() {
               style={{ display: "none" }}
               onChange={e => handleFile(e.target.files[0], "src")} />
           </div>
-          {ALLOW_UPLOAD && <>
+          {ALLOW_UPLOAD && (
             <input ref={xmpInputRef} type="file" accept=".xmp" multiple
               style={{ display: "none" }}
               onChange={e => uploadPresets(Array.from(e.target.files))} />
-            <input ref={importDataRef} type="file" accept=".json"
-              style={{ display: "none" }}
-              onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
-          </>}
+          )}
 
           {/* Options row */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
@@ -324,7 +284,7 @@ export default function App() {
               }
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              {ALLOW_UPLOAD && <>
+              {ALLOW_UPLOAD && (
                 <button
                   onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
                   disabled={uploadingPresets}
@@ -337,25 +297,7 @@ export default function App() {
                 >
                   {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
                 </button>
-                <button
-                  onClick={e => { e.stopPropagation(); importDataRef.current?.click(); }}
-                  title="导入学习数据（从其他环境同步）"
-                  style={{
-                    background: "none", border: `1px solid ${COLORS.border}`,
-                    color: COLORS.textMuted, padding: "4px 10px",
-                    fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
-                  }}
-                >↑ 同步</button>
-              </>}
-              <button
-                onClick={e => { e.stopPropagation(); exportData(); }}
-                title="导出学习数据"
-                style={{
-                  background: "none", border: `1px solid ${COLORS.border}`,
-                  color: COLORS.textMuted, padding: "4px 10px",
-                  fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
-                }}
-              >↓ 导出</button>
+              )}
               <span style={{ color: COLORS.textMuted, fontSize: "11px", fontFamily: "monospace" }}>
                 {libraryOpen ? "▲" : "▼"}
               </span>
@@ -373,12 +315,6 @@ export default function App() {
                 }}>
                   {uploadResult.error ? (
                     <span style={{ color: "#e08080" }}>✗ {uploadResult.error}</span>
-                  ) : uploadResult._import ? (
-                    <span style={{ color: COLORS.success }}>
-                      ✓ 同步完成 · 校准 {uploadResult.summary?.calibration_params ?? 0} 个参数 ·{" "}
-                      学习动作 {uploadResult.summary?.learned_actions ?? 0} 个 ·{" "}
-                      风格 {uploadResult.summary?.user_styles ?? 0} 个
-                    </span>
                   ) : (
                     <>
                       <span style={{ color: COLORS.success }}>✓ 已处理 {uploadResult.imported} 个文件</span>

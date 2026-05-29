@@ -32,8 +32,8 @@ from modules.action_basis import (
     top_actions, learn_from_uploads, get_action_info, reset_learned,
 )
 
-# 上传接口开关：本地开发设 ALLOW_PRESET_UPLOAD=true，生产环境不设（默认关闭）
-UPLOAD_ENABLED = os.getenv("ALLOW_PRESET_UPLOAD", "false").lower() == "true"
+# 上传接口开关：默认开启；Railway 生产环境设 DISABLE_PRESET_UPLOAD=true 关闭
+UPLOAD_ENABLED = os.getenv("DISABLE_PRESET_UPLOAD", "false").lower() != "true"
 
 app = FastAPI(title="LR Preset Generator", version="1.0.0")
 
