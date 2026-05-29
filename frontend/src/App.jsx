@@ -120,6 +120,15 @@ export default function App() {
     } catch {}
   };
 
+  const renameStyles = async () => {
+    try {
+      const res  = await fetch(`${API_BASE}/styles/rename`, { method: "POST" });
+      const data = await res.json();
+      setLibraryStyles(data.library || []);
+      setUploadResult({ _renamed: true, renamed: data.renamed });
+    } catch {}
+  };
+
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -317,6 +326,15 @@ export default function App() {
                     {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
                   </button>
                   <button
+                    onClick={e => { e.stopPropagation(); renameStyles(); }}
+                    title="用最新规则重新命名固化风格（无需重新上传）"
+                    style={{
+                      background: "none", border: `1px solid ${COLORS.accent}`,
+                      color: COLORS.accent, padding: "4px 10px",
+                      fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
+                    }}
+                  >重命名</button>
+                  <button
                     onClick={e => { e.stopPropagation(); seedStyles(); }}
                     title="将当前聚类固化为基础库（git commit 后永久生效）"
                     style={{
@@ -353,6 +371,8 @@ export default function App() {
                 }}>
                   {uploadResult.error ? (
                     <span style={{ color: "#e08080" }}>✗ {uploadResult.error}</span>
+                  ) : uploadResult._renamed ? (
+                    <span style={{ color: COLORS.accent }}>✓ 已重命名 {uploadResult.renamed} 个风格</span>
                   ) : uploadResult._seeded ? (
                     <div>
                       <span style={{ color: COLORS.success }}>✓ 已固化 {uploadResult.promoted} 个聚类到基础库</span>

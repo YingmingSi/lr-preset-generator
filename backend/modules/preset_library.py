@@ -155,49 +155,75 @@ def _auto_name(params: dict) -> str:
     生成的名称不保证全局唯一——batch_cluster 负责在结果中去重。
     """
     tags = _auto_tags(params)
-    hl  = float(params.get('Highlights', 0))
-    ct  = float(params.get('Contrast',   0))
-    bk  = float(params.get('Blacks',     0))
-    sh  = float(params.get('Shadows',    0))
+    hl    = float(params.get('Highlights', 0))
+    ct    = float(params.get('Contrast',   0))
+    bk    = float(params.get('Blacks',     0))
+    sh    = float(params.get('Shadows',    0))
     sat_o = float(params.get('SaturationAdjustmentOrange', 0))
     sat_g = float(params.get('SaturationAdjustmentGreen',  0))
     sat_b = float(params.get('SaturationAdjustmentBlue',   0))
     sat_y = float(params.get('SaturationAdjustmentYellow', 0))
+    sat_a = float(params.get('SaturationAdjustmentAqua',   0))
 
-    # ── 优先规则：色调方向明确时直接命名 ─────────────────────────────────
-    if '青橙'   in tags:                              return '青橙'
-    if '电影感' in tags and '暖色'  in tags:           return '暖调电影'
-    if '电影感' in tags:                               return '暗调电影'
-    if '日系'   in tags:                              return '日系清新'
-    if '胶片感' in tags and '暖色'  in tags:           return '暖调胶片'
-    if '胶片感' in tags:                               return '胶片复古'
-    if '冷调'   in tags:                              return '冷调风格'
-    if '暖色'   in tags and '高饱和' in tags:          return '暖色鲜艳'
-    if '暖色'   in tags:                              return '暖调风格'
+    # ── 色调方向明确时直接命名 ─────────────────────────────────────────
+    if '青橙'   in tags:
+        # 区分"纯提橙"与"压蓝绿+提橙"
+        if sat_o > 15 and sat_g < -20:  return '青橙去绿'
+        if sat_o > 15:                  return '青橙'
+        if sat_g < -50 and sat_b < -40: return '青橙极压冷色'
+        return '青橙'
+    if '暗调电影' in tags or ('电影感' in tags and '暖色' not in tags):
+        if bk < -35: return '深黑电影'
+        return '暗调电影'
+    if '暖调电影' in tags or ('电影感' in tags and '暖色' in tags):
+        return '暖调电影'
+    if '日系'   in tags:                return '日系清新'
+    if '胶片感' in tags and '暖色' in tags: return '暖调胶片'
+    if '胶片感' in tags:                return '胶片复古'
+    if '冷调'   in tags:
+        if sat_b < -40: return '冷调压蓝'
+        if sat_g < -30: return '冷调去绿'
+        return '冷调'
+    if '暖色'   in tags and '高饱和' in tags: return '暖色鲜艳'
+    if '暖色'   in tags:                return '暖调'
 
-    # ── 压制特征组合命名 ──────────────────────────────────────────────────
-    parts = []
-    # 影调
-    if '强压高光' in tags:          parts.append('强压高光')
-    elif '压高光' in tags:          parts.append('压高光')
-    if '低反差'   in tags:          parts.append('低反差')
-    elif '高对比' in tags:          parts.append('高对比')
-    if bk < -28 and '电影感' not in tags: parts.append('深黑')
-    if sh > 25 and '日系' not in tags:    parts.append('提阴影')
+    # ── 从最显著的参数组合生成名称 ──────────────────────────────────
+    # 影调词
+    tone = ''
+    if hl < -75:    tone = '极压高光'
+    elif hl < -55:  tone = '强压高光'
+    elif hl < -30:  tone = '压高光'
+    elif ct > 30 and bk < -25: tone = '高对比'
+    elif ct < -25 or (sh > 30 and bk > 10): tone = '低反差'
 
-    # 色彩
-    if '压绿'   in tags:            parts.append('压绿')
-    if '压黄橙' in tags:            parts.append('压黄')
-    if '压蓝青' in tags:            parts.append('压蓝')
-    if '冷感'   in tags:            parts.append('冷感')
-    if '暖感'   in tags:            parts.append('暖感')
-    if '低饱和' in tags and not parts: parts.append('低饱和')
+    # 色彩词：通道幅度优先，没有显著通道才用冷感/暖感
+    max_chan = max(abs(sat_g), abs(sat_b), abs(sat_o), abs(sat_y), abs(sat_a))
+    color_scores = [
+        ('极压绿蓝', sat_g < -60 and sat_b < -60),
+        ('压绿蓝',   sat_g < -35 and sat_b < -25),
+        ('主压绿',   sat_g < -50 and abs(sat_g) > abs(sat_b) * 1.5),
+        ('主压蓝',   sat_b < -40 and abs(sat_b) > abs(sat_g) * 1.5),
+        ('压橙黄',   sat_o < -30 and sat_y < -20),
+        ('压橙',     sat_o < -35),
+        # 当没有显著单通道时，才用冷暖感描述
+        ('暖感',     '暖感' in tags and max_chan < 30),
+        ('冷感',     '冷感' in tags and max_chan < 30),
+    ]
+    color = next((k for k, v in color_scores if v), '')
 
-    if len(parts) >= 2:
-        return '·'.join(parts[:2])
-    elif len(parts) == 1:
+    # 深黑：允许补充极压高光（BK 极深时区分两个极压高光簇）
+    depth = ''
+    if bk <= -35 and tone == '极压高光' and not color:
+        color = '深黑'   # 极压高光·深黑
+    elif bk <= -30 and tone not in ('强压高光', '高对比') and not color:
+        depth = '深黑'   # 压高光·深黑 / 深黑（主词）
+
+    parts = [p for p in [tone, color or depth] if p]
+    if len(parts) == 2:
+        return '·'.join(parts)
+    if len(parts) == 1:
         return parts[0]
-    return '自然调色'
+    return '中性平调'
 
 
 # ─── 内置经典风格模板 ─────────────────────────────────────────────────────────
@@ -1224,6 +1250,47 @@ def blend_with_style(
         t = float(style.get(key, 0))
         result[key] = int(round(a * (1 - lum_ratio) + t * lum_ratio))
 
+    return result
+
+
+def rename_seeded_styles() -> dict:
+    """
+    用最新的 _auto_name / _auto_tags 对所有 seeded_styles 重新命名，
+    并在结果中去重（同名加数字后缀），然后写入磁盘。
+    返回 {key: new_name} 的映射。
+    """
+    if not _seeded_styles:
+        return {}
+
+    # 第一遍：生成每个风格的新名称和标签
+    proposals: dict[str, str] = {}
+    for key, cluster in _seeded_styles.items():
+        params = cluster.get('params', {})
+        name   = _auto_name(params)
+        tags   = _auto_tags(params)
+        desc   = ' · '.join(tags)
+        proposals[key] = name
+        _seeded_styles[key]['name'] = name
+        _seeded_styles[key]['tags'] = tags
+        _seeded_styles[key]['desc'] = desc
+
+    # 第二遍：去重（同名加数字后缀）
+    name_count: dict[str, int] = {}
+    for name in proposals.values():
+        name_count[name] = name_count.get(name, 0) + 1
+
+    name_seen: dict[str, int] = {}
+    result: dict[str, str] = {}
+    for key, name in proposals.items():
+        if name_count[name] > 1:
+            name_seen[name] = name_seen.get(name, 0) + 1
+            unique = f'{name}{name_seen[name]}'
+            _seeded_styles[key]['name'] = unique
+            result[key] = unique
+        else:
+            result[key] = name
+
+    save_seeded_styles()
     return result
 
 

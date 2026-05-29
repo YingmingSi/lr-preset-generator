@@ -25,6 +25,7 @@ from modules.preset_library import (
     list_styles, parse_xmp_params,
     reset_user_styles, batch_cluster, BATCH_KMEANS_MIN, promote_to_seeded,
     decompose_seeded_styles, find_closest_seeded_style, get_style_action_weights,
+    rename_seeded_styles,
 )
 from modules.calibration import (
     load_calibration, apply_calibration, is_calibrated,
@@ -342,6 +343,15 @@ async def seed_styles():
         "library": list_styles(),
         "actions": get_action_info(),
     })
+
+
+@app.post("/styles/rename")
+async def rename_styles():
+    """用最新命名规则对 seeded_styles 重新命名（无需重新上传 XMP）"""
+    if not UPLOAD_ENABLED:
+        raise HTTPException(403, "此操作在生产环境中已禁用")
+    result = rename_seeded_styles()
+    return JSONResponse({"renamed": len(result), "mapping": result, "library": list_styles()})
 
 
 @app.delete("/styles/user")
