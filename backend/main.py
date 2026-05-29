@@ -262,14 +262,14 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
         calib_report = update_from_params_list(params_batch)
 
     # ── 动作库更新 ────────────────────────────────────────────────────────────
-    # 批量首次建库 → 全量 PCA 推导新动作基底（取代手工内置动作）
-    # 增量少量上传 → 残差 PCA 补充新方向（最低 3 个文件即可触发）
+    # 批量首次建库：全量 PCA（直接 PCA），动作量级 = 真实调色幅度
+    #   已能覆盖大部分方差，不再叠加残差 PCA（避免冗余）
+    # 增量少量上传：残差 PCA（只补充现有基底覆盖不到的新方向）
     learned_new = {}
     if is_bulk:
-        derive_user_actions(params_batch)   # 全量 PCA → user_actions.json
-        learned_new = learn_from_uploads(params_batch)  # 残差补充
+        derive_user_actions(params_batch)        # 全量 PCA → user_actions.json
     elif len(params_batch) >= 3:
-        learned_new = learn_from_uploads(
+        learned_new = learn_from_uploads(        # 残差 PCA → 仅补充新方向
             params_batch, min_samples=3, var_threshold=0.10
         )
 
