@@ -231,6 +231,85 @@ def _auto_name(params: dict) -> str:
 
 BUILTIN_STYLES: dict = {}  # 已移除内置风格
 
+# ─── 20个命名风格签名（方向特征，用于聚类命名匹配）──────────────────────────
+# 每条只列出最能区分该风格的几个关键参数；_style_vector 会把它们投影到统一特征空间
+# SplitToning 参数用真实 XMP 键名，_style_vector 内部做 cos/sin 编码
+STYLE_SIGNATURES: dict = {
+    '青橙':     {'SplitToningShadowHue': 210, 'SplitToningShadowSaturation': 15,
+                 'SplitToningHighlightHue': 38, 'SplitToningHighlightSaturation': 10,
+                 'SaturationAdjustmentGreen': -25, 'SaturationAdjustmentPurple': -30},
+    '黑金':     {'Blacks': -45, 'Contrast': 60,
+                 'SaturationAdjustmentGreen': -80, 'SaturationAdjustmentAqua': -75,
+                 'SaturationAdjustmentBlue': -60, 'SaturationAdjustmentPurple': -70,
+                 'SaturationAdjustmentMagenta': -65, 'SaturationAdjustmentOrange': 20},
+    '日系小清新': {'Shadows': 45, 'Blacks': 18, 'Contrast': -40,
+                  'Saturation': -15, 'SaturationAdjustmentGreen': 8},
+    '胶片复古':  {'Blacks': 22, 'SaturationAdjustmentOrange': 15,
+                  'SaturationAdjustmentGreen': -20, 'SaturationAdjustmentBlue': -18,
+                  'Contrast': 12},
+    '暗调浓郁':  {'Blacks': -50, 'Contrast': 65, 'Highlights': -40, 'Shadows': -20,
+                  'Saturation': -10},
+    '清新自然':  {'SaturationAdjustmentGreen': 28, 'SaturationAdjustmentAqua': 18,
+                  'Shadows': 15, 'Highlights': -12},
+    '暖阳落日':  {'SaturationAdjustmentOrange': 35, 'SaturationAdjustmentYellow': 25,
+                  'SaturationAdjustmentBlue': -38, 'SaturationAdjustmentAqua': -28},
+    '冷调都市':  {'SaturationAdjustmentBlue': 32, 'SaturationAdjustmentAqua': 20,
+                  'SaturationAdjustmentOrange': -22, 'Contrast': 35, 'Blacks': -18},
+    '梦幻柔光':  {'Blacks': 20, 'SaturationAdjustmentPurple': 22,
+                  'SaturationAdjustmentMagenta': 18, 'Contrast': -35, 'Shadows': 20},
+    '翡翠森林':  {'SaturationAdjustmentGreen': 35, 'SaturationAdjustmentAqua': 22,
+                  'Blacks': -22, 'Contrast': 18},
+    '人像肤色':  {'SaturationAdjustmentOrange': 22, 'SaturationAdjustmentRed': 12,
+                  'SaturationAdjustmentBlue': -12, 'Highlights': -18, 'Shadows': 10},
+    '落日金光':  {'SaturationAdjustmentOrange': 45, 'SaturationAdjustmentYellow': 35,
+                  'SaturationAdjustmentBlue': -50, 'SaturationAdjustmentAqua': -40,
+                  'SaturationAdjustmentGreen': -30},
+    '霓虹赛博':  {'SaturationAdjustmentPurple': 35, 'SaturationAdjustmentMagenta': 28,
+                  'SaturationAdjustmentBlue': 22, 'Blacks': -38, 'Contrast': 45},
+    '哑光褪色':  {'Blacks': 28, 'Contrast': -32, 'Saturation': -22, 'Clarity': -18,
+                  'SaturationAdjustmentGreen': -15},
+    '高调清透':  {'Whites': 30, 'Shadows': 22, 'Contrast': -38,
+                  'Saturation': -18, 'Highlights': -8},
+    '戏剧人像':  {'SaturationAdjustmentOrange': 22, 'Blacks': -42, 'Contrast': 55,
+                  'SaturationAdjustmentBlue': -22, 'SaturationAdjustmentGreen': -25},
+    '旅行鲜艳':  {'Saturation': 22, 'Vibrance': 18,
+                  'SaturationAdjustmentGreen': 22, 'SaturationAdjustmentOrange': 18,
+                  'SaturationAdjustmentBlue': 15},
+    '北欧冬日':  {'SaturationAdjustmentBlue': 18, 'SaturationAdjustmentAqua': 12,
+                  'SaturationAdjustmentOrange': -25, 'Contrast': -28,
+                  'Saturation': -12, 'Whites': 15},
+    '秋叶暖色':  {'SaturationAdjustmentOrange': 28, 'SaturationAdjustmentRed': 22,
+                  'SaturationAdjustmentYellow': 18, 'SaturationAdjustmentGreen': -32,
+                  'SaturationAdjustmentBlue': -15},
+    '都市青调':  {'SaturationAdjustmentAqua': 28, 'SaturationAdjustmentBlue': 18,
+                  'SaturationAdjustmentOrange': -18, 'Contrast': 22,
+                  'SplitToningShadowHue': 185, 'SplitToningShadowSaturation': 8},
+}
+
+
+def _match_named_style(params: dict) -> str:
+    """
+    将聚类质心参数与 STYLE_SIGNATURES 做余弦匹配，返回最近的风格名称。
+    始终返回一个名称（无阈值拒绝），保证聚类都有人类可读标签。
+    """
+    vec = _style_vector(params)
+    norm_v = float(np.linalg.norm(vec))
+
+    best_name = '自然调色'
+    best_sim  = -1.0
+    for name, sig in STYLE_SIGNATURES.items():
+        sig_vec = _style_vector(sig)
+        norm_s  = float(np.linalg.norm(sig_vec))
+        if norm_v < 0.5 or norm_s < 0.5:
+            continue
+        sim = float(np.dot(vec, sig_vec) / (norm_v * norm_s + 1e-8))
+        if sim > best_sim:
+            best_sim  = sim
+            best_name = name
+
+    return best_name
+
+
 # ─── 运行时存储 ───────────────────────────────────────────────────────────────
 # _seeded_styles : 已固化的风格（committed to git，永久可用）
 # _user_styles   : 当前 session 上传的实验聚类（可随时 Reset）
@@ -455,13 +534,16 @@ def _make_cluster(params: dict, source: str = 'user') -> dict:
     """从参数字典创建一个新聚类原型"""
     tags = _auto_tags(params)
     return {
-        'name':   _auto_name(params),
+        'name':   _match_named_style(params),   # 匹配到最近的已知风格名称
         'desc':   ' · '.join(tags),
         'tags':   tags,
         'count':  1,
         'source': source,
         'params': {k: params[k] for k in (SAT_KEYS + HUE_KEYS + LUM_KEYS +
-                   ['Contrast','Shadows','Highlights','Blacks','Whites','Saturation','Vibrance'])
+                   ['Contrast','Shadows','Highlights','Blacks','Whites','Saturation','Vibrance',
+                    'SplitToningShadowHue','SplitToningShadowSaturation',
+                    'SplitToningHighlightHue','SplitToningHighlightSaturation',
+                    'SplitToningBalance'])
                    if k in params},
     }
 
@@ -486,7 +568,7 @@ def _merge_cluster(key: str, new_params: dict) -> None:
     tags             = _auto_tags(merged)
     cluster['tags']  = tags
     cluster['desc']  = ' · '.join(tags)
-    cluster['name']  = _auto_name(merged)
+    cluster['name']  = _match_named_style(merged)
 
 
 def _find_closest_user(vec: np.ndarray) -> tuple:
@@ -737,7 +819,7 @@ def rename_seeded_styles() -> dict:
     proposals: dict[str, str] = {}
     for key, cluster in _seeded_styles.items():
         params = cluster.get('params', {})
-        name   = _auto_name(params)
+        name   = _match_named_style(params)   # 匹配到已知风格名称
         tags   = _auto_tags(params)
         desc   = ' · '.join(tags)
         proposals[key] = name
