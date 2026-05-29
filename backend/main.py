@@ -22,7 +22,7 @@ from modules.xmp_generator import generate_xmp, params_summary
 from modules.preset_renderer import render_and_validate
 from modules.preset_library import (
     load_user_styles, add_user_preset, list_styles, parse_xmp_params,
-    reset_user_styles, batch_cluster, BATCH_KMEANS_MIN,
+    reset_user_styles, batch_cluster, BATCH_KMEANS_MIN, promote_to_seeded,
 )
 from modules.calibration import (
     load_calibration, apply_calibration, is_calibrated,
@@ -274,9 +274,18 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
     })
 
 
+@app.post("/styles/seed")
+async def seed_styles():
+    """将当前 session 的 K-means 聚类固化为基础库（写入 seeded_styles.json）"""
+    if not UPLOAD_ENABLED:
+        raise HTTPException(403, "此操作在生产环境中已禁用")
+    result = promote_to_seeded()
+    return JSONResponse({**result, "library": list_styles()})
+
+
 @app.delete("/styles/user")
 async def delete_user_styles():
-    """清空所有用户上传的风格聚类（保留内置风格）"""
+    """清空当前 session 上传的聚类（不影响已固化的 seeded_styles）"""
     if not UPLOAD_ENABLED:
         raise HTTPException(403, "此操作在生产环境中已禁用")
     reset_user_styles()

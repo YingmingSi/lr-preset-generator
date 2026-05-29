@@ -671,9 +671,14 @@ BUILTIN_STYLES: dict = {
     },
 }
 
-# ─── 运行时用户聚类存储 ───────────────────────────────────────────────────────
-# 格式：{ cluster_key: { name, desc, tags, count, source, params } }
-_user_styles: dict = {}
+# ─── 运行时存储 ───────────────────────────────────────────────────────────────
+# _seeded_styles : 已固化的风格（committed to git，永久可用）
+# _user_styles   : 当前 session 上传的实验聚类（可随时 Reset）
+_seeded_styles: dict = {}
+_user_styles:   dict = {}
+
+_DATA_DIR_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # repo root / backend
+_SEEDED_PATH   = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'seeded_styles.json')
 
 
 # ─── 持久化 ───────────────────────────────────────────────────────────────────
@@ -682,23 +687,33 @@ def _user_styles_path() -> str:
     return os.path.join(_DATA_DIR, '_user_styles.json')
 
 
-def load_user_styles() -> None:
-    """启动时从磁盘加载用户聚类 JSON"""
-    global _user_styles
-    json_path = _user_styles_path()
-    if not os.path.exists(json_path):
-        return
-    with open(json_path, 'r', encoding='utf-8') as f:
-        raw = json.load(f)
-    # 兼容旧格式（params 直接平铺在顶层）
+def _load_cluster_dict(raw: dict) -> dict:
+    """将 JSON dict 加载为规范 cluster 格式（兼容旧格式迁移）"""
+    result = {}
     for key, val in raw.items():
         if 'params' in val:
-            _user_styles[key] = val
+            result[key] = val
         else:
-            # 旧格式迁移：提取真实参数，重建为新格式
             params = {k: v for k, v in val.items() if not k.startswith('_')}
             if params:
-                _user_styles[key] = _make_cluster(params, source='user')
+                result[key] = _make_cluster(params, source='seeded')
+    return result
+
+
+def load_user_styles() -> None:
+    """启动时加载 seeded_styles.json（固化库）和 _user_styles.json（会话库）"""
+    global _seeded_styles, _user_styles
+
+    # 固化库：每次部署都有，不会被 Reset 清除
+    if os.path.exists(_SEEDED_PATH):
+        with open(_SEEDED_PATH, 'r', encoding='utf-8') as f:
+            _seeded_styles = _load_cluster_dict(json.load(f))
+
+    # 会话库：当前 session 上传的实验聚类
+    session_path = _user_styles_path()
+    if os.path.exists(session_path):
+        with open(session_path, 'r', encoding='utf-8') as f:
+            _user_styles = _load_cluster_dict(json.load(f))
 
 
 def save_user_styles() -> None:
@@ -707,8 +722,39 @@ def save_user_styles() -> None:
         json.dump(_user_styles, f, ensure_ascii=False, indent=2)
 
 
+def promote_to_seeded() -> dict:
+    """
+    将当前 session 的 K-means 聚类固化为基础库（写入 seeded_styles.json）。
+    固化后的风格在任何环境部署后都自动可用，无需重新上传 XMP。
+    返回固化摘要。
+    """
+    global _seeded_styles
+
+    if not _user_styles:
+        return {'promoted': 0, 'message': '当前会话没有可固化的聚类'}
+
+    # 将 session 聚类合并进 seeded，source 标记为 'seeded'
+    new_count = 0
+    for key, cluster in _user_styles.items():
+        seeded_cluster = dict(cluster)
+        seeded_cluster['source'] = 'seeded'
+        _seeded_styles[key] = seeded_cluster
+        new_count += 1
+
+    os.makedirs(os.path.dirname(_SEEDED_PATH), exist_ok=True)
+    with open(_SEEDED_PATH, 'w', encoding='utf-8') as f:
+        json.dump(_seeded_styles, f, ensure_ascii=False, indent=2)
+
+    return {
+        'promoted':    new_count,
+        'total_seeded': len(_seeded_styles),
+        'path':        _SEEDED_PATH,
+        'message':     f'已固化 {new_count} 个聚类到 seeded_styles.json，提交到 git 后永久生效',
+    }
+
+
 def reset_user_styles() -> None:
-    """清空所有用户上传的聚类原型"""
+    """清空当前 session 的聚类（不影响已固化的 seeded_styles）"""
     global _user_styles
     _user_styles = {}
     path = _user_styles_path()
@@ -936,18 +982,23 @@ def add_user_preset(xmp_content: str, filename: str) -> dict:
 
 def all_styles() -> dict:
     """
-    返回内置模板 + 用户聚类的合并字典。
-    用户聚类的 params 被展开为顶层键，与内置模板格式一致，
-    供 _style_vector / blend_with_style 直接使用。
+    返回内置模板 + 固化风格 + 会话聚类的合并字典。
+    优先级：builtin < seeded < user（后者可覆盖同名 key）
     """
     merged = dict(BUILTIN_STYLES)
+
+    def _flatten(cluster: dict, source_tag: str) -> dict:
+        return {**cluster['params'],
+                '_name':   cluster['name'],
+                '_desc':   cluster['desc'],
+                '_tags':   cluster['tags'],
+                '_count':  cluster['count'],
+                '_source': source_tag}
+
+    for key, cluster in _seeded_styles.items():
+        merged[key] = _flatten(cluster, 'seeded')
     for key, cluster in _user_styles.items():
-        flat = {**cluster['params'],
-                '_name':  cluster['name'],
-                '_desc':  cluster['desc'],
-                '_tags':  cluster['tags'],
-                '_count': cluster['count']}
-        merged[key] = flat
+        merged[key] = _flatten(cluster, 'user')
     return merged
 
 
@@ -1040,13 +1091,19 @@ def list_styles() -> list:
     for key, s in all_styles().items():
         if key.startswith('_'):
             continue
-        count = s.get('_count', None)
+        raw_source = s.get('_source', '')
+        if key in BUILTIN_STYLES:
+            source = 'builtin'
+        elif raw_source == 'seeded':
+            source = 'seeded'
+        else:
+            source = 'user'
         out.append({
             'key':    key,
             'name':   s.get('_name', key),
             'desc':   s.get('_desc', ''),
             'tags':   s.get('_tags', []),
-            'source': 'builtin' if key in BUILTIN_STYLES else 'user',
-            'count':  count,
+            'source': source,
+            'count':  s.get('_count'),
         })
     return out

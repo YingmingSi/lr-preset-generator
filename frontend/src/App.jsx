@@ -111,6 +111,15 @@ export default function App() {
     } catch {}
   };
 
+  const seedStyles = async () => {
+    try {
+      const res  = await fetch(`${API_BASE}/styles/seed`, { method: "POST" });
+      const data = await res.json();
+      setLibraryStyles(data.library || []);
+      setUploadResult({ _seeded: true, message: data.message, promoted: data.promoted });
+    } catch {}
+  };
+
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -308,8 +317,17 @@ export default function App() {
                     {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
                   </button>
                   <button
-                    onClick={e => { e.stopPropagation(); if (window.confirm("清空所有用户上传的风格聚类？（内置风格保留）")) resetUserStyles(); }}
-                    title="清空用户上传的风格聚类，重新上传后会重新分类"
+                    onClick={e => { e.stopPropagation(); seedStyles(); }}
+                    title="将当前聚类固化为基础库（git commit 后永久生效）"
+                    style={{
+                      background: "none", border: `1px solid ${COLORS.success}`,
+                      color: COLORS.success, padding: "4px 10px",
+                      fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
+                    }}
+                  >固化</button>
+                  <button
+                    onClick={e => { e.stopPropagation(); if (window.confirm("清空当前 session 的聚类？（已固化的风格不受影响）")) resetUserStyles(); }}
+                    title="仅清空本次会话上传的聚类"
                     style={{
                       background: "none", border: `1px solid ${COLORS.error}`,
                       color: COLORS.error, padding: "4px 10px",
@@ -335,6 +353,14 @@ export default function App() {
                 }}>
                   {uploadResult.error ? (
                     <span style={{ color: "#e08080" }}>✗ {uploadResult.error}</span>
+                  ) : uploadResult._seeded ? (
+                    <div>
+                      <span style={{ color: COLORS.success }}>✓ 已固化 {uploadResult.promoted} 个聚类到基础库</span>
+                      <div style={{ marginTop: "6px", color: COLORS.textMuted, fontSize: "10px" }}>
+                        {uploadResult.message}
+                        <br/>运行 <code style={{ color: COLORS.accent }}>git add backend/data/seeded_styles.json &amp;&amp; git commit</code> 后永久生效
+                      </div>
+                    </div>
                   ) : (
                     <>
                       <span style={{ color: COLORS.success }}>✓ 已处理 {uploadResult.imported} 个文件</span>
@@ -385,8 +411,12 @@ export default function App() {
                       <div key={s.key} style={{ padding: "10px 14px", background: COLORS.bg, border: `1px solid ${COLORS.border}` }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "4px" }}>
                           <span style={{ fontSize: "11px", color: COLORS.text, fontFamily: "monospace" }}>{s.name}</span>
-                          <span style={{ fontSize: "9px", color: s.source === "builtin" ? COLORS.accentDim : COLORS.success, fontFamily: "monospace", letterSpacing: "0.06em" }}>
-                            {s.source === "builtin" ? "内置" : `用户 ×${s.count ?? 1}`}
+                          <span style={{ fontSize: "9px", fontFamily: "monospace", letterSpacing: "0.06em", color:
+                            s.source === "builtin" ? COLORS.accentDim :
+                            s.source === "seeded"  ? COLORS.success : COLORS.accent }}>
+                            {s.source === "builtin" ? "内置" :
+                             s.source === "seeded"  ? `固化 ×${s.count ?? 1}` :
+                                                      `会话 ×${s.count ?? 1}`}
                           </span>
                         </div>
                         {s.tags?.length > 0 && (
