@@ -24,8 +24,17 @@ LUM_KEYS  = [f'LuminanceAdjustment{b}'  for b in BUCKETS]
 TONE_KEYS = ['Exposure', 'Contrast', 'Highlights', 'Shadows', 'Whites', 'Blacks',
              'Saturation', 'Vibrance', 'Clarity']
 
-# 参与分解的全部参数（顺序固定 = 向量维度）共 41 维
-PARAM_KEYS = SAT_KEYS + HUE_KEYS + LUM_KEYS + TONE_KEYS
+# 色调分离 / 色彩分级（旧版 SplitToning + 新版 ColorGrade 并存）
+# 用 sin/cos 编码 Hue（避免 0° 和 360° 在线性空间里跳变），幅度 = Saturation × sin/cos
+SPLIT_TONE_KEYS = [
+    'SplitToning_ShadowR',  'SplitToning_ShadowG',   # shadow hue encoded as R/G channel offsets
+    'SplitToning_HlightR',  'SplitToning_HlightG',   # highlight hue encoded
+    'SplitToningBalance',
+    'ColorGradeShadowLum',  'ColorGradeHighlightLum', 'ColorGradeMidtoneLum',
+]
+
+# 参与分解的全部参数（顺序固定 = 向量维度）41 + 8 = 49 维
+PARAM_KEYS = SAT_KEYS + HUE_KEYS + LUM_KEYS + TONE_KEYS + SPLIT_TONE_KEYS
 
 _DATA_DIR          = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 _LEARNED_PATH      = os.path.join(_DATA_DIR, 'learned_actions.json')
@@ -175,8 +184,39 @@ _cache_keys = None
 
 # ─── 内部工具 ─────────────────────────────────────────────────────────────────
 
+def _split_tone_encode(params: dict) -> dict:
+    """
+    将 SplitToning 的 Hue+Saturation 编码为笛卡尔分量，
+    避免色相角度（0° ≈ 360°）在线性空间里产生的跳变。
+
+    SplitToning_ShadowR  = ShadowSat × cos(ShadowHue)   （正 = 橙/红方向）
+    SplitToning_ShadowG  = ShadowSat × sin(ShadowHue)   （正 = 青/绿方向）
+    同理 HlightR / HlightG
+    量级缩放 ÷ 10，使之与 HSL（0–100）在同一数量级
+    """
+    rad = np.pi / 180.0
+    sh_sat = float(params.get('SplitToningShadowSaturation',    0))
+    sh_hue = float(params.get('SplitToningShadowHue',           0))
+    hl_sat = float(params.get('SplitToningHighlightSaturation', 0))
+    hl_hue = float(params.get('SplitToningHighlightHue',        0))
+    return {
+        'SplitToning_ShadowR':    sh_sat * np.cos(sh_hue * rad) / 10.0,
+        'SplitToning_ShadowG':    sh_sat * np.sin(sh_hue * rad) / 10.0,
+        'SplitToning_HlightR':    hl_sat * np.cos(hl_hue * rad) / 10.0,
+        'SplitToning_HlightG':    hl_sat * np.sin(hl_hue * rad) / 10.0,
+        'SplitToningBalance':     float(params.get('SplitToningBalance', 0)),
+        'ColorGradeShadowLum':    float(params.get('ColorGradeShadowLum',    0)),
+        'ColorGradeHighlightLum': float(params.get('ColorGradeHighlightLum', 0)),
+        'ColorGradeMidtoneLum':   float(params.get('ColorGradeMidtoneLum',   0)),
+    }
+
+
 def _to_vec(params: dict) -> np.ndarray:
-    return np.array([float(params.get(k, 0)) for k in PARAM_KEYS], dtype=np.float64)
+    encoded = _split_tone_encode(params)
+    return np.array(
+        [float(params.get(k, encoded.get(k, 0))) for k in PARAM_KEYS],
+        dtype=np.float64,
+    )
 
 
 def _all_actions() -> dict:

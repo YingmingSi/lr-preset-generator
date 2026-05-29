@@ -67,17 +67,43 @@ def _auto_tags(params: dict) -> list:
 
     tags = []
 
-    # ── 色调方向（提升方向）──────────────────────────────────────────────
-    if sat['Orange'] > 10 and sat['Aqua'] > 8:
+    # ── 色调方向（HSL 和 SplitToning 合并判断）──────────────────────────
+    sh_sat = float(params.get('SplitToningShadowSaturation',    0))
+    sh_hue = float(params.get('SplitToningShadowHue',           0))
+    hl_sat = float(params.get('SplitToningHighlightSaturation', 0))
+    hl_hue = float(params.get('SplitToningHighlightHue',        0))
+
+    def _is_orange(h): return 15 <= h <= 65
+    def _is_blue(h):   return 165 <= h <= 260
+    def _is_warm(h):   return 15 <= h <= 65 or 320 <= h <= 360
+    def _is_cool(h):   return 155 <= h <= 265
+
+    st_shadow_cool  = _is_cool(sh_hue)  and sh_sat >= 4
+    st_shadow_warm  = _is_warm(sh_hue)  and sh_sat >= 4
+    st_hl_warm      = _is_warm(hl_hue)  and hl_sat >= 3
+    st_hl_cool      = _is_cool(hl_hue)  and hl_sat >= 3
+    st_hl_orange    = _is_orange(hl_hue) and hl_sat >= 3
+
+    # 青橙：冷色阴影 + 暖/橙色高光（最经典的 SplitToning 配色）
+    if st_shadow_cool and (st_hl_warm or st_hl_orange):
         tags.append('青橙')
+    # HSL 饱和度正向的青橙
+    elif sat['Orange'] > 10 and sat['Aqua'] > 8:
+        tags.append('青橙')
+    # 单方向 SplitToning
+    elif st_shadow_cool or st_hl_cool:
+        tags.append('冷调')
+    elif st_shadow_warm or st_hl_warm:
+        tags.append('暖色')
+    # 纯 HSL 方向判断（SplitToning 为零时）
     elif warm_up > 10:
         tags.append('暖色')
     elif cool_up > 8:
         tags.append('冷调')
     elif warm_down > cool_down + 12 and warm_down > 15:
-        tags.append('冷感')      # 压暖多于压冷 → 相对冷色倾向
+        tags.append('冷感')
     elif cool_down > warm_down + 12 and cool_down > 15:
-        tags.append('暖感')      # 压冷多于压暖 → 相对暖色倾向
+        tags.append('暖感')
 
     # ── 色彩抑制特征 ────────────────────────────────────────────────────
     if green_down > 35:
@@ -1105,7 +1131,12 @@ def all_styles() -> dict:
 # ─── 风格匹配 ─────────────────────────────────────────────────────────────────
 
 def _style_vector(params: dict) -> np.ndarray:
-    """提取风格特征向量（饱和度8维 + 色相8维×0.3 + 亮度5维）"""
+    """
+    提取风格特征向量（8+8+5 维 HSL/影调 + 4 维 SplitToning 笛卡尔分量）。
+    SplitToning 对颜色方向贡献最大，给予较高权重（×3），
+    使 K-means 主要按颜色特征分组。
+    """
+    rad = np.pi / 180.0
     sat = np.array([params.get(k, 0) for k in SAT_KEYS], dtype=np.float32)
     hue = np.array([params.get(k, 0) for k in HUE_KEYS], dtype=np.float32) * 0.3
     lum = np.array([
@@ -1115,7 +1146,18 @@ def _style_vector(params: dict) -> np.ndarray:
         params.get('Blacks',     0) * 0.4,
         params.get('Saturation', 0) * 0.5,
     ], dtype=np.float32)
-    return np.concatenate([sat, hue, lum])
+    # SplitToning 色调分离（笛卡尔编码，量级 ≈ HSL 参数，权重 ×3 以主导色彩分组）
+    sh_sat = float(params.get('SplitToningShadowSaturation',    0))
+    sh_hue = float(params.get('SplitToningShadowHue',           0))
+    hl_sat = float(params.get('SplitToningHighlightSaturation', 0))
+    hl_hue = float(params.get('SplitToningHighlightHue',        0))
+    st = np.array([
+        sh_sat * np.cos(sh_hue * rad) * 3,
+        sh_sat * np.sin(sh_hue * rad) * 3,
+        hl_sat * np.cos(hl_hue * rad) * 3,
+        hl_sat * np.sin(hl_hue * rad) * 3,
+    ], dtype=np.float32)
+    return np.concatenate([sat, hue, lum, st])
 
 
 def match_style(params: dict) -> tuple:
