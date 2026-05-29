@@ -511,13 +511,23 @@ def batch_cluster(params_list: list, filenames: list) -> list:
 
     merged_results = []
     new_user_styles: dict = {}
+    # 追踪本轮已分配的 key，防止 _next_cluster_key 重复返回同一个 key
+    used_keys = set(_user_styles.keys()) | set(_seeded_styles.keys())
+
+    def _fresh_key() -> str:
+        idx = 0
+        while f'u_{idx}' in used_keys:
+            idx += 1
+        used_keys.add(f'u_{idx}')
+        return f'u_{idx}'
 
     for name, group in name_groups.items():
         if len(group) == 1:
-            # 唯一名称，直接保留
+            # 唯一名称，直接保留原始 key
             r   = group[0]
             key = r['cluster_key']
             new_user_styles[key] = _user_styles[key]
+            used_keys.add(key)
             merged_results.append({
                 'cluster_key': key,
                 'name':  name,
@@ -529,13 +539,11 @@ def batch_cluster(params_list: list, filenames: list) -> list:
         else:
             # 多个同名聚类 → 加权合并为一个
             total_count = sum(r['count'] for r in group)
-            # 收集所有文件的原始参数（按 count 加权）
             all_p: list = []
             all_files: list = []
             for r in group:
                 ck = r['cluster_key']
                 cl = _user_styles[ck]
-                # 用 count 作为权重重复 params
                 for _ in range(r['count']):
                     all_p.append(cl['params'])
                 all_files.extend(cl.get('source_files', []))
@@ -547,11 +555,11 @@ def batch_cluster(params_list: list, filenames: list) -> list:
                 v = float(np.mean(vals))
                 merged_avg[mk] = round(v, 2) if mk == 'Exposure' else int(round(v))
 
-            merged_key           = _next_cluster_key()
-            merged_cluster       = _make_cluster(merged_avg, source='user')
+            merged_key              = _fresh_key()   # 用本地计数，不会重复
+            merged_cluster          = _make_cluster(merged_avg, source='user')
             merged_cluster['count']        = total_count
             merged_cluster['source_files'] = all_files
-            merged_cluster['name']         = name   # 保留匹配名称（无数字后缀）
+            merged_cluster['name']         = name
             new_user_styles[merged_key]    = merged_cluster
             merged_results.append({
                 'cluster_key': merged_key,
