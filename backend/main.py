@@ -147,23 +147,47 @@ async def analyze(
         validation   = {}
         preview_b64  = None
         if src_data is not None:
-            tone_curve  = luminance_params.get('tone_curve', [(0,0),(64,64),(128,128),(192,192),(255,255)])
+            # 迭代自验证：最多 4 轮，每轮基于残差继续修正
+            # 每轮修正量随迭代递减（阻尼因子），防止震荡
+            MAX_ITER    = 4
+            DAMPING     = [1.0, 0.6, 0.35, 0.20]
             all_params  = {**luminance_params, **color_params, **scene_result.get('params', {})}
-            val         = render_and_validate(
-                src_data['rgb_float'],
-                ref_data['rgb_float'],
-                all_params,
-                tone_curve,
-            )
-            corrections = {k: v for k, v in val.get('corrections', {}).items()
-                           if not k.startswith('_')}
-            if corrections:
-                scene_result['params'].update(corrections)
+            total_corrections: dict = {}
+            preview_b64 = None
+            validation  = {}
 
-            preview_b64 = val.pop('preview_b64', None)
-            validation  = {k: v for k, v in val.items() if k != 'corrections'}
-            validation['corrections_applied'] = list(corrections.keys())
-            color_cast  = val.get('corrections', {}).get('_color_cast_note', '')
+            for iter_i in range(MAX_ITER):
+                tone_curve = luminance_params.get('tone_curve',
+                             [(0,0),(64,64),(128,128),(192,192),(255,255)])
+                val = render_and_validate(
+                    src_data['rgb_float'],
+                    ref_data['rgb_float'],
+                    all_params,
+                    tone_curve,
+                )
+                raw_corr = {k: v for k, v in val.get('corrections', {}).items()
+                            if not k.startswith('_')}
+
+                # 阻尼：后轮修正幅度缩小
+                damp = DAMPING[iter_i]
+                corr = {k: (int(round(v * damp)) if isinstance(v, (int, float)) else v)
+                        for k, v in raw_corr.items()}
+
+                if not corr:
+                    break   # 已收敛
+
+                # 应用修正到 all_params
+                scene_result['params'].update(corr)
+                all_params = {**luminance_params, **color_params, **scene_result.get('params', {})}
+                total_corrections.update(corr)
+
+                # 最后一次迭代保留预览
+                if iter_i == MAX_ITER - 1 or not corr:
+                    preview_b64 = val.pop('preview_b64', None)
+                    validation  = {k: v for k, v in val.items() if k != 'corrections'}
+
+            validation['corrections_applied'] = list(total_corrections.keys())
+            color_cast = val.get('corrections', {}).get('_color_cast_note', '') if val else ''
             if color_cast:
                 validation['color_cast_note'] = color_cast
         # ─────────────────────────────────────────────────────────────────
