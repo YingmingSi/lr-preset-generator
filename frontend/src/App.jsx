@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE      = import.meta.env.VITE_API_URL    || "http://localhost:8000";
+const ALLOW_UPLOAD  = import.meta.env.VITE_ALLOW_UPLOAD === "true";
 
 const COLORS = {
   bg:          "#0a0a0a",
@@ -231,12 +232,14 @@ export default function App() {
               style={{ display: "none" }}
               onChange={e => handleFile(e.target.files[0], "src")} />
           </div>
-          <input ref={xmpInputRef} type="file" accept=".xmp" multiple
-            style={{ display: "none" }}
-            onChange={e => uploadPresets(Array.from(e.target.files))} />
-          <input ref={importDataRef} type="file" accept=".json"
-            style={{ display: "none" }}
-            onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
+          {ALLOW_UPLOAD && <>
+            <input ref={xmpInputRef} type="file" accept=".xmp" multiple
+              style={{ display: "none" }}
+              onChange={e => uploadPresets(Array.from(e.target.files))} />
+            <input ref={importDataRef} type="file" accept=".json"
+              style={{ display: "none" }}
+              onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
+          </>}
 
           {/* Options row */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
@@ -321,36 +324,38 @@ export default function App() {
               }
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <button
-                onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
-                disabled={uploadingPresets}
-                style={{
-                  background: "none", border: `1px solid ${COLORS.accentDim}`,
-                  color: uploadingPresets ? COLORS.textMuted : COLORS.accentDim,
-                  padding: "4px 14px", fontSize: "10px", letterSpacing: "0.1em",
-                  fontFamily: "monospace", cursor: uploadingPresets ? "not-allowed" : "pointer",
-                }}
-              >
-                {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
-              </button>
+              {ALLOW_UPLOAD && <>
+                <button
+                  onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
+                  disabled={uploadingPresets}
+                  style={{
+                    background: "none", border: `1px solid ${COLORS.accentDim}`,
+                    color: uploadingPresets ? COLORS.textMuted : COLORS.accentDim,
+                    padding: "4px 14px", fontSize: "10px", letterSpacing: "0.1em",
+                    fontFamily: "monospace", cursor: uploadingPresets ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
+                </button>
+                <button
+                  onClick={e => { e.stopPropagation(); importDataRef.current?.click(); }}
+                  title="导入学习数据（从其他环境同步）"
+                  style={{
+                    background: "none", border: `1px solid ${COLORS.border}`,
+                    color: COLORS.textMuted, padding: "4px 10px",
+                    fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
+                  }}
+                >↑ 同步</button>
+              </>}
               <button
                 onClick={e => { e.stopPropagation(); exportData(); }}
-                title="导出学习数据（校准 + 动作基 + 风格库）"
+                title="导出学习数据"
                 style={{
                   background: "none", border: `1px solid ${COLORS.border}`,
                   color: COLORS.textMuted, padding: "4px 10px",
                   fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
                 }}
               >↓ 导出</button>
-              <button
-                onClick={e => { e.stopPropagation(); importDataRef.current?.click(); }}
-                title="导入学习数据（从其他环境同步）"
-                style={{
-                  background: "none", border: `1px solid ${COLORS.border}`,
-                  color: COLORS.textMuted, padding: "4px 10px",
-                  fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
-                }}
-              >↑ 同步</button>
               <span style={{ color: COLORS.textMuted, fontSize: "11px", fontFamily: "monospace" }}>
                 {libraryOpen ? "▲" : "▼"}
               </span>

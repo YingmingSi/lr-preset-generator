@@ -14,8 +14,8 @@ node_modules/
 frontend/dist/
 frontend/.env.local
 
-# Data (user uploads, calibration, learned actions — not committed)
-backend/data/
+# Data — 提交学习数据 JSON，忽略原始 XMP 上传文件
+backend/data/presets/*.xmp
 
 # Misc
 .env

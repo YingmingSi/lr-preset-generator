@@ -32,6 +32,9 @@ from modules.action_basis import (
     top_actions, learn_from_uploads, get_action_info, reset_learned,
 )
 
+# 上传接口开关：本地开发设 ALLOW_PRESET_UPLOAD=true，生产环境不设（默认关闭）
+UPLOAD_ENABLED = os.getenv("ALLOW_PRESET_UPLOAD", "false").lower() == "true"
+
 app = FastAPI(title="LR Preset Generator", version="1.0.0")
 
 # 启动时加载用户预设库、校准数据、已学习动作
@@ -217,12 +220,9 @@ async def download_xmp(
 
 @app.post("/upload_presets")
 async def upload_presets(preset_files: List[UploadFile] = File(...)):
-    """
-    上传用户的 XMP 预设文件。
-    同时执行两件事：
-      1. 聚类归并到风格模板库（用于风格匹配）
-      2. 从参数分布中学习合理范围（用于校准约束）
-    """
+    """上传 XMP 预设文件（仅本地/管理员环境开放）"""
+    if not UPLOAD_ENABLED:
+        raise HTTPException(403, "预设上传在此部署环境中已禁用")
     results       = []
     params_batch  = []   # 收集所有解析出的参数，用于校准
 
@@ -316,10 +316,9 @@ async def export_data():
 
 @app.post("/data/import")
 async def import_data(payload: dict = Body(...)):
-    """
-    导入学习数据，覆盖当前状态。
-    接受 /data/export 导出的 JSON 格式。
-    """
+    """导入学习数据（仅本地/管理员环境开放）"""
+    if not UPLOAD_ENABLED:
+        raise HTTPException(403, "数据导入在此部署环境中已禁用")
     from modules import calibration as _cal, action_basis as _ab, preset_library as _pl
 
     errors = []
