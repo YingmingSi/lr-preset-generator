@@ -304,6 +304,27 @@ def top_actions(weights: dict, n: int = 6, min_ratio: float = 0.04) -> list:
     return result
 
 
+def mix_weights_with_style_prior(analysis_weights: dict,
+                                  style_weights: dict,
+                                  style_alpha: float = 0.3) -> dict:
+    """
+    混合图像分析权重和风格先验权重。
+
+    final_w[k] = analysis_w[k] × (1-α) + style_w[k] × α
+
+    这样可以生成不属于 seeded_styles 本身、但在其权重空间附近的新风格。
+    """
+    all_keys = set(analysis_weights.keys()) | set(style_weights.keys())
+    result = {}
+    for key in all_keys:
+        a_w = analysis_weights.get(key, 0.0)
+        s_w = style_weights.get(key, 0.0)
+        mixed = a_w * (1.0 - style_alpha) + s_w * style_alpha
+        if abs(mixed) > 1e-4:
+            result[key] = float(mixed)
+    return result
+
+
 # ─── 从上传 XMP 推导用户动作基底（主 PCA）────────────────────────────────────
 
 def derive_user_actions(params_list: list,

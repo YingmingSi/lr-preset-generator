@@ -24,6 +24,7 @@ from modules.preset_library import (
     load_user_styles, add_user_preset, add_user_preset_incremental,
     list_styles, parse_xmp_params,
     reset_user_styles, batch_cluster, BATCH_KMEANS_MIN, promote_to_seeded,
+    decompose_seeded_styles, find_closest_seeded_style, get_style_action_weights,
 )
 from modules.calibration import (
     load_calibration, apply_calibration, is_calibrated,
@@ -32,7 +33,7 @@ from modules.calibration import (
 from modules.action_basis import (
     load_learned, decompose as action_decompose, compose as action_compose,
     top_actions, learn_from_uploads, get_action_info, reset_learned,
-    derive_user_actions, has_user_actions,
+    derive_user_actions, has_user_actions, mix_weights_with_style_prior,
 )
 
 # 上传接口开关：默认开启；Railway 生产环境设 DISABLE_PRESET_UPLOAD=true 关闭
@@ -104,10 +105,23 @@ async def analyze(
             color_params     = apply_calibration(color_params)
         # ─────────────────────────────────────────────────────────────────
 
-        # ── 动作基底分解 + 合成 ───────────────────────────────────────────
+        # ── 动作基底分解 + 风格先验混合 + 合成 ──────────────────────────────
         raw_combined = {**luminance_params, **color_params,
                         **scene_result.get('params', {})}
         action_weights, action_r2 = action_decompose(raw_combined)
+
+        # 找最近 seeded_style，用其动作权重作为先验
+        best_style_key, best_style_sim, best_style_info = find_closest_seeded_style(raw_combined)
+        style_weights = {}
+        style_note = ""
+        if best_style_key and best_style_sim > 0.50:
+            style_weights, style_r2 = get_style_action_weights(best_style_key)
+            if style_weights:
+                action_weights = mix_weights_with_style_prior(
+                    action_weights, style_weights, style_alpha=0.3
+                )
+                style_note = f"参考风格: {best_style_info.get('name', best_style_key)} ({round(best_style_sim*100)}%)"
+
         composed = action_compose(action_weights, raw_combined, r2=action_r2)
         # 将合成结果写回（HSL + 亮度均更新）
         for k, v in composed.items():
@@ -162,6 +176,7 @@ async def analyze(
             "validation":           validation,
             "action_top":           action_top,
             "action_r2":            round(action_r2, 3),
+            "style_note":           style_note,
             "calibration":          calib_summary(),
         }
         if preview_b64:
@@ -290,19 +305,27 @@ async def upload_presets(preset_files: List[UploadFile] = File(...)):
 async def seed_styles():
     """
     固化当前学习状态：
-    · seeded_styles.json  — K-means 风格聚类（提交 git 后永久展示）
-    · user_actions.json   — PCA 动作基底（提交 git 后作为生成依据）
-    · calibration.json    — 参数范围约束（已自动更新）
+    · seeded_styles.json  — K-means 风格聚类 + 每个风格的动作权重分解
+    · user_actions.json   — PCA 动作基底（生成参考）
+    · calibration.json    — 参数范围约束
+
+    固化后，每个 seeded_style 包含 action_weights，可作为风格先验用于生成。
     """
     if not UPLOAD_ENABLED:
         raise HTTPException(403, "此操作在生产环境中已禁用")
     from modules.action_basis import save_user_actions, has_user_actions
+
     style_result = promote_to_seeded()
     if has_user_actions():
-        save_user_actions()   # 确保 user_actions.json 写入磁盘
+        save_user_actions()
+
+    # 分解所有 seeded_styles 为动作权重（供生成时使用）
+    decompose_report = decompose_seeded_styles()
+
     return JSONResponse({
         **style_result,
         "user_actions_saved": has_user_actions(),
+        "styles_decomposed": len(decompose_report),
         "library": list_styles(),
         "actions": get_action_info(),
     })

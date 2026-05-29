@@ -1122,6 +1122,69 @@ def blend_with_style(
     return result
 
 
+def decompose_seeded_styles() -> dict:
+    """
+    把所有 seeded_styles 分解为动作权重，写回 JSON。
+    这样每个风格就成为 PCA 空间中的一个点，可被 mix_by_style_prior() 使用。
+    """
+    from modules.action_basis import decompose
+
+    report = {}
+    for key, cluster in _seeded_styles.items():
+        params = cluster.get('params', {})
+        if not params:
+            continue
+        weights, r2 = decompose(params)
+        _seeded_styles[key]['action_weights'] = weights
+        _seeded_styles[key]['action_r2'] = round(r2, 3)
+        report[key] = {'weights': len(weights), 'r2': r2}
+
+    save_user_styles()  # seeded 也存在这个文件
+    return report
+
+
+def get_style_action_weights(style_key: str) -> tuple:
+    """
+    获取某个风格的动作权重。
+    返回 (weights_dict, r2)，若无权重则返回 ({}, 0.0)
+    """
+    style = _seeded_styles.get(style_key, {})
+    weights = style.get('action_weights', {})
+    r2 = style.get('action_r2', 0.0)
+    return weights, r2
+
+
+def find_closest_seeded_style(params: dict) -> tuple:
+    """
+    在 seeded_styles 中找最相近的风格。
+    返回 (style_key, similarity_score, style_info)
+    """
+    if not _seeded_styles:
+        return None, 0.0, {}
+
+    vec = _style_vector(params)
+    best_key = None
+    best_sim = -1.0
+    best_style = {}
+
+    for key, style in _seeded_styles.items():
+        style_params = style.get('params', {})
+        if not style_params:
+            continue
+        style_vec = _style_vector(style_params)
+        norm_v = float(np.linalg.norm(vec))
+        norm_s = float(np.linalg.norm(style_vec))
+        if norm_v < 0.1 or norm_s < 0.1:
+            continue
+        sim = float(np.dot(vec, style_vec) / (norm_v * norm_s + 1e-8))
+        if sim > best_sim:
+            best_sim = sim
+            best_key = key
+            best_style = style
+
+    return best_key, best_sim, best_style
+
+
 def list_styles() -> list:
     """返回所有可用风格的摘要列表（供前端展示）"""
     out = []
