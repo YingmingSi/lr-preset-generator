@@ -103,7 +103,7 @@ def update_from_params_list(params_list: list) -> dict:
             continue
 
         arr = np.array(new_vals)
-        new_lo, new_p50, new_hi = float(np.percentile(arr, [5, 50, 95]))
+        new_lo, new_p50, new_hi = (float(v) for v in np.percentile(arr, [5, 50, 95]))
         n_new = len(new_vals)
 
         if key in _calib:
@@ -115,10 +115,10 @@ def update_from_params_list(params_list: list) -> dict:
             merged_hi  = (old['hi']   * n_old + new_hi  * n_new) / total
             merged_mean= (old['mean'] * n_old + new_p50 * n_new) / total
             _calib[key] = {
-                'lo':    round(merged_lo,   2),
-                'hi':    round(merged_hi,   2),
-                'mean':  round(merged_mean, 2),
-                'count': total,
+                'lo':    round(float(merged_lo),   2),
+                'hi':    round(float(merged_hi),   2),
+                'mean':  round(float(merged_mean), 2),
+                'count': int(total),
             }
         else:
             _calib[key] = {
