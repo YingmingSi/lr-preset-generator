@@ -52,9 +52,10 @@ export default function App() {
   const [error,       setError]       = useState(null);
   const [activeTab,   setActiveTab]   = useState("report");
 
-  // 风格模板库
+  // 风格模板库 + 校准
   const [libraryOpen,        setLibraryOpen]        = useState(false);
   const [libraryStyles,      setLibraryStyles]      = useState(null);
+  const [calibration,        setCalibration]        = useState(null);
   const [uploadingPresets,   setUploadingPresets]   = useState(false);
   const [uploadResult,       setUploadResult]       = useState(null);
   const xmpInputRef = useRef();
@@ -67,6 +68,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/styles`);
       const data = await res.json();
       setLibraryStyles(data.styles || []);
+      if (data.calibration) setCalibration(data.calibration);
     } catch {}
   };
 
@@ -81,11 +83,19 @@ export default function App() {
       const data = await res.json();
       setUploadResult(data);
       setLibraryStyles(data.library || []);
+      if (data.calibration) setCalibration(data.calibration);
     } catch (e) {
       setUploadResult({ error: e.message });
     } finally {
       setUploadingPresets(false);
     }
+  };
+
+  const clearCalibration = async () => {
+    try {
+      await fetch(`${API_BASE}/calibration`, { method: "DELETE" });
+      setCalibration({ calibrated: false, xmp_count: 0, param_count: 0, key_ranges: {} });
+    } catch {}
   };
 
   const handleFile = useCallback((file, type) => {
@@ -299,17 +309,25 @@ export default function App() {
                       {uploadResult.presets?.map((p, i) => (
                         <div key={i} style={{ marginTop: "5px", color: COLORS.textMuted }}>
                           <span style={{ color: COLORS.textDim }}>· {p.filename}</span>
-                          {p.action === 'added'       && <span style={{ color: COLORS.success,    marginLeft: "8px" }}>→ 新建原型「{p.name}」</span>}
-                          {p.action === 'merged'      && <span style={{ color: COLORS.accent,     marginLeft: "8px" }}>→ 合并至「{p.name}」（相似度 {Math.round((p.similarity||0)*100)}%）</span>}
-                          {p.action === 'merged_full' && <span style={{ color: COLORS.accentDim,  marginLeft: "8px" }}>→ 库已满，并入「{p.name}」</span>}
-                          {p.error                   && <span style={{ color: "#e08080",          marginLeft: "8px" }}>✗ {p.error}</span>}
+                          {p.action === 'added'       && <span style={{ color: COLORS.success,   marginLeft: "8px" }}>→ 新建原型「{p.name}」</span>}
+                          {p.action === 'merged'      && <span style={{ color: COLORS.accent,    marginLeft: "8px" }}>→ 合并至「{p.name}」（{Math.round((p.similarity||0)*100)}%）</span>}
+                          {p.action === 'merged_full' && <span style={{ color: COLORS.accentDim, marginLeft: "8px" }}>→ 库已满，并入「{p.name}」</span>}
+                          {p.error                   && <span style={{ color: "#e08080",         marginLeft: "8px" }}>✗ {p.error}</span>}
                           {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
                         </div>
                       ))}
+                      {uploadResult.learned_new?.length > 0 && (
+                        <div style={{ marginTop: "8px", color: COLORS.success, fontSize: "10px" }}>
+                          ✦ 学习到新动作：{uploadResult.learned_new.join('、')}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
               )}
+
+              {/* 校准状态 */}
+              <CalibrationPanel calib={calibration} onClear={clearCalibration} />
 
               {libraryStyles ? (
                 libraryStyles.length > 0 ? (
@@ -491,11 +509,33 @@ function ReportTab({ result }) {
         {result.compression_detected && <Row label="图片质量" value="检测到压缩，已补偿" warn />}
         {result.is_raw_source          && <Row label="原图格式" value="RAW（高精度）" good />}
         {result.camera_note            && <Row label="相机补偿" value={result.camera_note} />}
-        {result.curve_style            && <Row label="曲线风格" value={result.curve_style} />}
-        {result.matched_style          && <Row label="匹配模板" value={`${result.matched_style}（相似度 ${Math.round((result.style_similarity || 0) * 100)}%）`} />}
+        {result.curve_style && <Row label="曲线风格" value={result.curve_style} />}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        {/* 动作分解 */}
+        {result.action_top?.length > 0 && (
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "14px" }}>
+              <Label>动作分解</Label>
+              <span style={{ fontSize: "9px", fontFamily: "monospace", color: result.action_r2 > 0.7 ? COLORS.success : result.action_r2 > 0.4 ? COLORS.accent : COLORS.warning }}>
+                R² = {Math.round((result.action_r2 || 0) * 100)}%
+              </span>
+            </div>
+            {result.action_top.map(a => (
+              <div key={a.key} style={{ marginBottom: "9px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px", fontSize: "11px", fontFamily: "monospace" }}>
+                  <span style={{ color: COLORS.text }}>{a.label}</span>
+                  <span style={{ color: COLORS.accent }}>{Math.round(a.ratio * 100)}%</span>
+                </div>
+                <div style={{ height: "2px", background: COLORS.border }}>
+                  <div style={{ height: "100%", width: `${Math.round(a.ratio * 100)}%`, background: COLORS.accent, transition: "width 0.6s ease" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
           <Label>参数置信度</Label>
           <div style={{ marginTop: "12px" }}>
@@ -615,6 +655,67 @@ function ConfBar({ label, value }) {
       <div style={{ height: "2px", background: COLORS.border }}>
         <div style={{ height: "100%", width: `${pct}%`, background: color, transition: "width 0.6s ease" }} />
       </div>
+    </div>
+  );
+}
+
+function CalibrationPanel({ calib, onClear }) {
+  const [showRanges, setShowRanges] = useState(false);
+  if (!calib) {
+    return (
+      <div style={{ marginBottom: "14px", padding: "10px 14px", background: COLORS.bg, border: `1px solid ${COLORS.border}`, fontSize: "11px", fontFamily: "monospace", color: COLORS.textMuted }}>
+        参数校准：未校准（使用内置默认范围）· 上传 XMP 预设后自动校准
+      </div>
+    );
+  }
+  return (
+    <div style={{ marginBottom: "14px", background: COLORS.bg, border: `1px solid ${calib.calibrated ? COLORS.success : COLORS.border}` }}>
+      <div
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", cursor: "pointer", userSelect: "none" }}
+        onClick={() => setShowRanges(v => !v)}
+      >
+        <div style={{ fontSize: "11px", fontFamily: "monospace" }}>
+          {calib.calibrated ? (
+            <span style={{ color: COLORS.success }}>
+              ✓ 参数校准：已激活 · 基于 {calib.xmp_count} 个 XMP · 覆盖 {calib.param_count} 个参数
+            </span>
+          ) : (
+            <span style={{ color: COLORS.textMuted }}>参数校准：未激活（上传 XMP 预设后自动学习）</span>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          {calib.calibrated && (
+            <button onClick={e => { e.stopPropagation(); onClear(); }} style={{
+              background: "none", border: `1px solid ${COLORS.error}`,
+              color: COLORS.error, padding: "2px 10px",
+              fontSize: "9px", fontFamily: "monospace", cursor: "pointer", letterSpacing: "0.06em",
+            }}>
+              重置
+            </button>
+          )}
+          {calib.calibrated && (
+            <span style={{ color: COLORS.textMuted, fontSize: "10px", fontFamily: "monospace" }}>
+              {showRanges ? "▲" : "▼"}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {showRanges && calib.calibrated && Object.keys(calib.key_ranges || {}).length > 0 && (
+        <div style={{ borderTop: `1px solid ${COLORS.border}`, padding: "10px 14px" }}>
+          <div style={{ fontSize: "9px", color: COLORS.textMuted, fontFamily: "monospace", marginBottom: "8px", letterSpacing: "0.1em" }}>
+            学习到的参数范围（P5 ~ P95）
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "4px 20px" }}>
+            {Object.entries(calib.key_ranges).map(([k, r]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", fontFamily: "monospace", padding: "2px 0", borderBottom: `1px solid ${COLORS.border}` }}>
+                <span style={{ color: COLORS.textMuted }}>{k.replace('SaturationAdjustment', 'Sat·').replace('Adjustment', '')}</span>
+                <span style={{ color: COLORS.accent }}>[{r.lo > 0 ? `+${r.lo}` : r.lo}, {r.hi > 0 ? `+${r.hi}` : r.hi}]</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

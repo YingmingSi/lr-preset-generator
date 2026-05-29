@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Data (user uploads, calibration, learned actions — not committed)
+backend/data/
+
+# Misc
+.env
+.DS_Store
+*.log

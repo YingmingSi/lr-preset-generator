@@ -20,13 +20,23 @@ from modules.camera_profiles import apply_camera_compensation, get_camera_descri
 from modules.xmp_generator import generate_xmp, params_summary
 from modules.preset_renderer import render_and_validate
 from modules.preset_library import (
-    load_user_styles, add_user_preset, match_style, blend_with_style, list_styles
+    load_user_styles, add_user_preset, list_styles, parse_xmp_params,
+)
+from modules.calibration import (
+    load_calibration, apply_calibration, is_calibrated,
+    update_from_params_list, get_summary as calib_summary, reset_calibration,
+)
+from modules.action_basis import (
+    load_learned, decompose as action_decompose, compose as action_compose,
+    top_actions, learn_from_uploads, get_action_info, reset_learned,
 )
 
 app = FastAPI(title="LR Preset Generator", version="1.0.0")
 
-# 启动时加载用户预设库
+# 启动时加载用户预设库、校准数据、已学习动作
 load_user_styles()
+load_calibration()
+load_learned()
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,17 +91,26 @@ async def analyze(
             src_scene_type=src_scene_type,
         )
 
-        # ── 风格模板匹配 + 混合 ───────────────────────────────────────────
-        combined_for_match = {**luminance_params, **color_params,
-                              **scene_result.get('params', {})}
-        matched_style, style_sim, style_name = match_style(combined_for_match)
-        if matched_style:
-            blended = blend_with_style(combined_for_match, matched_style, style_sim)
-            # 仅将 HSL 部分写回 color_params（亮度参数通过 scene_result 微调）
-            for k, v in blended.items():
-                if any(k.startswith(p) for p in
-                       ('HueAdjustment', 'SaturationAdjustment', 'LuminanceAdjustment')):
-                    color_params[k] = v
+        # ── 校准约束 ──────────────────────────────────────────────────────
+        if is_calibrated():
+            luminance_params = apply_calibration(luminance_params)
+            color_params     = apply_calibration(color_params)
+        # ─────────────────────────────────────────────────────────────────
+
+        # ── 动作基底分解 + 合成 ───────────────────────────────────────────
+        raw_combined = {**luminance_params, **color_params,
+                        **scene_result.get('params', {})}
+        action_weights, action_r2 = action_decompose(raw_combined)
+        composed = action_compose(action_weights, raw_combined, r2=action_r2)
+        # 将合成结果写回（HSL + 亮度均更新）
+        for k, v in composed.items():
+            if k in luminance_params:
+                luminance_params[k] = v
+            elif k in color_params or any(k.startswith(p) for p in
+                 ('HueAdjustment', 'SaturationAdjustment', 'LuminanceAdjustment',
+                  'Saturation', 'Vibrance')):
+                color_params[k] = v
+        action_top = top_actions(action_weights)
         # ─────────────────────────────────────────────────────────────────
 
         # ── 自我验证与自动修正（仅双图模式）─────────────────────────────
@@ -106,7 +125,6 @@ async def analyze(
                 all_params,
                 tone_curve,
             )
-            # 将自动修正写回 scene_result.params，使 XMP 采用修正后的值
             corrections = {k: v for k, v in val.get('corrections', {}).items()
                            if not k.startswith('_')}
             if corrections:
@@ -135,8 +153,9 @@ async def analyze(
             "camera_note":          camera_note,
             "curve_style":          curve_style,
             "validation":           validation,
-            "matched_style":        style_name if matched_style else "",
-            "style_similarity":     style_sim,
+            "action_top":           action_top,
+            "action_r2":            round(action_r2, 3),
+            "calibration":          calib_summary(),
         }
         if preview_b64:
             response_data["preview_b64"] = preview_b64
@@ -170,6 +189,10 @@ async def download_xmp(
         if camera_brand:
             color_params = apply_camera_compensation(color_params, camera_brand)
 
+        if is_calibrated():
+            luminance_params = apply_calibration(luminance_params)
+            color_params     = apply_calibration(color_params)
+
         scene_result = analyze_scene_and_correct(
             ref_bytes,
             {**luminance_params, **color_params},
@@ -193,26 +216,75 @@ async def download_xmp(
 
 @app.post("/upload_presets")
 async def upload_presets(preset_files: List[UploadFile] = File(...)):
-    """上传用户的 XMP 预设文件，解析后加入风格模板库"""
-    results = []
+    """
+    上传用户的 XMP 预设文件。
+    同时执行两件事：
+      1. 聚类归并到风格模板库（用于风格匹配）
+      2. 从参数分布中学习合理范围（用于校准约束）
+    """
+    results       = []
+    params_batch  = []   # 收集所有解析出的参数，用于校准
+
     for f in preset_files:
         if not f.filename.lower().endswith('.xmp'):
             continue
         content = (await f.read()).decode('utf-8', errors='ignore')
+
+        # 加入风格库
         summary = add_user_preset(content, f.filename)
         results.append(summary)
+
+        # 收集参数用于校准
+        params = parse_xmp_params(content)
+        if params:
+            params_batch.append(params)
+
+    # 更新校准范围 + 学习新动作
+    calib_report  = {}
+    learned_new   = {}
+    if params_batch:
+        calib_report = update_from_params_list(params_batch)
+        learned_new  = learn_from_uploads(params_batch)
+
     return JSONResponse({
-        "success": True,
-        "imported": len(results),
-        "presets": results,
-        "library": list_styles(),
+        "success":        True,
+        "imported":       len(results),
+        "presets":        results,
+        "library":        list_styles(),
+        "calibration":    calib_summary(),
+        "calib_updated":  len(calib_report),
+        "actions":        get_action_info(),
+        "learned_new":    [v.get('_label', k) for k, v in learned_new.items()],
     })
 
 
 @app.get("/styles")
 async def get_styles():
-    """获取当前风格模板库列表"""
-    return JSONResponse({"styles": list_styles()})
+    """获取当前风格模板库列表及校准状态"""
+    return JSONResponse({
+        "styles":      list_styles(),
+        "calibration": calib_summary(),
+    })
+
+
+@app.get("/actions")
+async def get_actions():
+    """获取当前动作基底列表（内置 + 已学习）"""
+    return JSONResponse({"actions": get_action_info()})
+
+
+@app.delete("/actions/learned")
+async def clear_learned_actions():
+    """清除所有学习到的动作，恢复仅使用内置动作基底"""
+    reset_learned()
+    return JSONResponse({"success": True, "actions": get_action_info()})
+
+
+@app.delete("/calibration")
+async def clear_calibration():
+    """清除校准数据，恢复使用内置默认范围"""
+    reset_calibration()
+    return JSONResponse({"success": True, "calibration": calib_summary()})
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ HUE_KEYS = [f'HueAdjustment{b}'        for b in BUCKETS]
 LUM_KEYS = [f'LuminanceAdjustment{b}'  for b in BUCKETS]
 
 MAX_USER_CLUSTERS = 12    # 用户聚类上限
-MERGE_THRESHOLD   = 0.78  # 余弦相似度超过此值时合并而非新建
+MERGE_THRESHOLD   = 0.88  # 余弦相似度超过此值时合并而非新建（提高防止过度聚合）
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'presets')
 
@@ -45,12 +45,26 @@ def parse_xmp_params(xmp_content: str) -> dict:
 # ─── 自动分析与命名 ────────────────────────────────────────────────────────────
 
 def _auto_tags(params: dict) -> list:
-    """从参数特征生成语义标签列表"""
-    warm_sat   = float(np.mean([params.get(f'SaturationAdjustment{b}', 0) for b in ('Red', 'Orange', 'Yellow')]))
-    cool_sat   = float(np.mean([params.get(f'SaturationAdjustment{b}', 0) for b in ('Aqua', 'Blue', 'Purple')]))
-    orange_sat = float(params.get('SaturationAdjustmentOrange', 0))
-    aqua_sat   = float(params.get('SaturationAdjustmentAqua',   0))
-    green_sat  = float(params.get('SaturationAdjustmentGreen',  0))
+    """
+    从参数特征生成语义标签列表。
+
+    设计原则：
+    · 色调方向用「各方向最大正向值」而非均值，避免被零值通道稀释
+      （Orange=25, Red=0, Yellow=0 → warm_max=25，而非均值 8.3）
+    · 青橙判断：Orange 和 Aqua 同时为正，且都不低于全局最大绝对值的 20%
+    · 阈值相对化，适配真实用户预设（幅度 10–40）而非内置样本（70–90）
+    """
+    sat = {b: float(params.get(f'SaturationAdjustment{b}', 0)) for b in BUCKETS}
+
+    # 各方向最大正向提升值（负值归零，不污染方向判断）
+    warm_max  = max(sat['Red'],  sat['Orange'], sat['Yellow'], 0)
+    cool_max  = max(sat['Aqua'], sat['Blue'],   sat['Purple'], 0)
+    green_max = max(sat['Green'], 0)
+
+    # 全局最大绝对值（衡量整体调整强度）
+    all_max    = max((abs(v) for v in sat.values()), default=0)
+    orange_sat = sat['Orange']
+    aqua_sat   = sat['Aqua']
     overall    = float(params.get('Saturation',  0))
     blacks     = float(params.get('Blacks',       0))
     shadows    = float(params.get('Shadows',      0))
@@ -59,37 +73,44 @@ def _auto_tags(params: dict) -> list:
 
     tags = []
 
-    # 色调方向：先检查橙+青的签名性特征，再看整体均值
-    if orange_sat > 40 and aqua_sat > 25:
-        tags.append('青橙')
-    elif warm_sat > 18 and cool_sat > 12:
-        tags.append('青橙')
-    elif warm_sat > 15 or orange_sat > 25:
-        tags.append('暖色')
-    elif cool_sat > 15 or aqua_sat > 25:
-        tags.append('冷调')
-    if green_sat > 30:
-        tags.append('自然绿')
+    # ── 色调方向 ──────────────────────────────────────────────────────────
+    # 最低有效阈值 8：低于此视为噪声，不作方向判断
+    MIN_SAT = 8
+    if warm_max >= MIN_SAT or cool_max >= MIN_SAT or green_max >= MIN_SAT:
+        dominant = max(warm_max, cool_max, green_max)
+        sig = dominant * 0.20   # 次方向至少达到主方向 20% 才算"共同存在"
 
-    # 影调风格
-    if blacks < -30 and contrast > 30:
-        tags.append('电影感')
-    elif blacks > 18 or (shadows > 30 and contrast < -10):
-        tags.append('胶片感')
-    elif shadows > 40 and contrast < -20:
-        tags.append('日系')
+        # 青橙：橙色和青色都是正向，且都足够显著
+        if orange_sat >= max(sig, MIN_SAT) and aqua_sat >= max(sig, MIN_SAT):
+            tags.append('青橙')
+        elif warm_max >= cool_max and warm_max >= green_max:
+            tags.append('暖色')
+        elif cool_max > warm_max and cool_max >= green_max:
+            tags.append('冷调')
 
-    # 饱和度
-    all_sat_neg = warm_sat < 0 and cool_sat < 0
-    if overall < -15 or (all_sat_neg and abs(warm_sat) + abs(cool_sat) > 30):
+        # 绿色独立主导时打标
+        if green_max >= MIN_SAT and green_max > warm_max * 1.2 and green_max > cool_max * 1.2:
+            tags.append('自然绿')
+
+    # ── 整体去饱和 ────────────────────────────────────────────────────────
+    neg_count = sum(1 for v in sat.values() if v < -8)
+    if overall < -10 or (neg_count >= 5 and all_max < 20):
         tags.append('低饱和')
-    elif overall > 25 or warm_sat > 40 or cool_sat > 40:
+    elif overall > 15 or all_max >= 35:
         tags.append('高饱和')
 
-    # 反差
-    if contrast > 45:
+    # ── 影调风格（独立判断，不互斥；_auto_name 中按优先级选主标签）────────
+    if blacks < -22 and contrast > 22:
+        tags.append('电影感')
+    if blacks > 12 or (shadows > 22 and contrast < -8):
+        tags.append('胶片感')
+    if shadows > 32 and contrast < -15:
+        tags.append('日系')
+
+    # ── 反差 ──────────────────────────────────────────────────────────────
+    if contrast > 38:
         tags.append('高对比')
-    elif highlights < -20 and shadows > 15:
+    elif highlights < -15 and shadows > 10:
         tags.append('低反差')
 
     if not tags:
@@ -118,6 +139,7 @@ def _auto_name(params: dict) -> str:
 # ─── 内置经典风格模板 ─────────────────────────────────────────────────────────
 
 BUILTIN_STYLES: dict = {
+    # ── 1. 青橙 ──────────────────────────────────────────────────────────────
     'teal_orange': {
         '_name': '青橙',
         '_desc': '暖色偏橙，冷色偏青，橙青饱和大幅提高，绿/紫/品红全压低',
@@ -273,6 +295,379 @@ BUILTIN_STYLES: dict = {
         'Shadows': 18, 'Highlights': -18,
         'Vibrance': 28, 'Saturation': 15,
     },
+    # ── 7. 暖阳落日 ───────────────────────────────────────────────────────────
+    'sunset_warm': {
+        '_name': '暖阳落日',
+        '_desc': '橙黄暖光主导，冷色大幅压低，适合日出日落',
+        '_tags': ['暖色', '高饱和'],
+        'SaturationAdjustmentRed':    38,
+        'SaturationAdjustmentOrange': 68,
+        'SaturationAdjustmentYellow': 48,
+        'SaturationAdjustmentGreen':  -28,
+        'SaturationAdjustmentAqua':   -38,
+        'SaturationAdjustmentBlue':   -45,
+        'SaturationAdjustmentPurple': -22,
+        'SaturationAdjustmentMagenta': 15,
+        'HueAdjustmentRed':    8,
+        'HueAdjustmentOrange': 10,
+        'HueAdjustmentYellow':  5,
+        'HueAdjustmentGreen':  15,
+        'HueAdjustmentAqua':   -8,
+        'HueAdjustmentBlue':  -12,
+        'HueAdjustmentPurple':  0,
+        'HueAdjustmentMagenta': 5,
+        'LuminanceAdjustmentOrange': 18,
+        'LuminanceAdjustmentYellow': 12,
+        'LuminanceAdjustmentBlue':  -12,
+        'Shadows': 18, 'Highlights': -28, 'Whites': 15,
+        'Contrast': 20, 'Saturation': 8,
+    },
+    # ── 8. 冷调都市 ───────────────────────────────────────────────────────────
+    'cold_city': {
+        '_name': '冷调都市',
+        '_desc': '蓝青主导，压暖色，高对比，适合建筑街拍',
+        '_tags': ['冷调', '高对比', '电影感'],
+        'SaturationAdjustmentRed':    -28,
+        'SaturationAdjustmentOrange': -30,
+        'SaturationAdjustmentYellow': -18,
+        'SaturationAdjustmentGreen':  -15,
+        'SaturationAdjustmentAqua':    42,
+        'SaturationAdjustmentBlue':    48,
+        'SaturationAdjustmentPurple':  18,
+        'SaturationAdjustmentMagenta':-18,
+        'HueAdjustmentRed':    0,
+        'HueAdjustmentOrange': 0,
+        'HueAdjustmentYellow': 0,
+        'HueAdjustmentGreen':  0,
+        'HueAdjustmentAqua':  -10,
+        'HueAdjustmentBlue':  -18,
+        'HueAdjustmentPurple': 0,
+        'HueAdjustmentMagenta':0,
+        'LuminanceAdjustmentBlue':  -12,
+        'LuminanceAdjustmentAqua':   -8,
+        'Blacks': -38, 'Shadows': -22, 'Highlights': -38,
+        'Contrast': 48, 'Saturation': -12,
+    },
+    # ── 9. 梦幻柔光 ───────────────────────────────────────────────────────────
+    'soft_dream': {
+        '_name': '梦幻柔光',
+        '_desc': '提黑柔和，品红紫调，低对比，少女感',
+        '_tags': ['胶片感', '低反差', '低饱和'],
+        'SaturationAdjustmentRed':    12,
+        'SaturationAdjustmentOrange': 18,
+        'SaturationAdjustmentYellow': -8,
+        'SaturationAdjustmentGreen':  -25,
+        'SaturationAdjustmentAqua':   -18,
+        'SaturationAdjustmentBlue':   -22,
+        'SaturationAdjustmentPurple':  15,
+        'SaturationAdjustmentMagenta': 22,
+        'HueAdjustmentRed':    8,
+        'HueAdjustmentOrange': 5,
+        'HueAdjustmentYellow': 0,
+        'HueAdjustmentGreen':  20,
+        'HueAdjustmentAqua':   12,
+        'HueAdjustmentBlue':   15,
+        'HueAdjustmentPurple': -8,
+        'HueAdjustmentMagenta':-5,
+        'LuminanceAdjustmentRed':    15,
+        'LuminanceAdjustmentOrange': 10,
+        'LuminanceAdjustmentMagenta': 8,
+        'Blacks': 28, 'Shadows': 32, 'Highlights': -12, 'Whites': 18,
+        'Contrast': -28, 'Saturation': -15, 'Vibrance': 10,
+    },
+    # ── 10. 翡翠森林 ──────────────────────────────────────────────────────────
+    'emerald_forest': {
+        '_name': '翡翠森林',
+        '_desc': '深饱和绿色，青调辅助，暗调森林感',
+        '_tags': ['自然绿', '高饱和'],
+        'SaturationAdjustmentRed':    -22,
+        'SaturationAdjustmentOrange': -18,
+        'SaturationAdjustmentYellow':  28,
+        'SaturationAdjustmentGreen':   78,
+        'SaturationAdjustmentAqua':    38,
+        'SaturationAdjustmentBlue':    18,
+        'SaturationAdjustmentPurple': -20,
+        'SaturationAdjustmentMagenta':-18,
+        'HueAdjustmentRed':    0,
+        'HueAdjustmentOrange': 0,
+        'HueAdjustmentYellow':-10,
+        'HueAdjustmentGreen': -12,
+        'HueAdjustmentAqua':   -5,
+        'HueAdjustmentBlue':    8,
+        'HueAdjustmentPurple':  0,
+        'HueAdjustmentMagenta': 0,
+        'LuminanceAdjustmentGreen': 10,
+        'LuminanceAdjustmentAqua':   5,
+        'LuminanceAdjustmentBlue':  -8,
+        'Blacks': -22, 'Shadows': -12, 'Highlights': -20,
+        'Contrast': 28, 'Vibrance': 22,
+    },
+    # ── 11. 人像肤色 ──────────────────────────────────────────────────────────
+    'portrait_skin': {
+        '_name': '人像肤色',
+        '_desc': '橙色肤色强化，冷色轻度压低，高光柔和，自然感',
+        '_tags': ['暖色', '低反差'],
+        'SaturationAdjustmentRed':    28,
+        'SaturationAdjustmentOrange': 42,
+        'SaturationAdjustmentYellow': 18,
+        'SaturationAdjustmentGreen':  -22,
+        'SaturationAdjustmentAqua':   -28,
+        'SaturationAdjustmentBlue':   -18,
+        'SaturationAdjustmentPurple': -12,
+        'SaturationAdjustmentMagenta': 10,
+        'HueAdjustmentRed':    5,
+        'HueAdjustmentOrange': 6,
+        'HueAdjustmentYellow': 3,
+        'HueAdjustmentGreen':  0,
+        'HueAdjustmentAqua':   0,
+        'HueAdjustmentBlue':   0,
+        'HueAdjustmentPurple': 0,
+        'HueAdjustmentMagenta':0,
+        'LuminanceAdjustmentRed':    8,
+        'LuminanceAdjustmentOrange': 15,
+        'LuminanceAdjustmentYellow': 5,
+        'Blacks': 12, 'Shadows': 28, 'Highlights': -15,
+        'Contrast': -15, 'Saturation': -5, 'Vibrance': 18,
+    },
+    # ── 12. 落日金光 ──────────────────────────────────────────────────────────
+    'golden_hour': {
+        '_name': '落日金光',
+        '_desc': '极暖橙黄，强烈金色质感，大幅压蓝绿',
+        '_tags': ['暖色', '高饱和', '高对比'],
+        'SaturationAdjustmentRed':    48,
+        'SaturationAdjustmentOrange': 75,
+        'SaturationAdjustmentYellow': 60,
+        'SaturationAdjustmentGreen':  -30,
+        'SaturationAdjustmentAqua':   -50,
+        'SaturationAdjustmentBlue':   -58,
+        'SaturationAdjustmentPurple': -28,
+        'SaturationAdjustmentMagenta': 18,
+        'HueAdjustmentRed':    8,
+        'HueAdjustmentOrange': 12,
+        'HueAdjustmentYellow':  5,
+        'HueAdjustmentGreen':  18,
+        'HueAdjustmentAqua':  -10,
+        'HueAdjustmentBlue':  -15,
+        'HueAdjustmentPurple':  0,
+        'HueAdjustmentMagenta': 8,
+        'LuminanceAdjustmentOrange': 22,
+        'LuminanceAdjustmentYellow': 16,
+        'LuminanceAdjustmentBlue':  -15,
+        'Shadows': 15, 'Highlights': -32, 'Whites': 22,
+        'Contrast': 22, 'Saturation': 12,
+    },
+    # ── 13. 霓虹赛博 ──────────────────────────────────────────────────────────
+    'neon_cyber': {
+        '_name': '霓虹赛博',
+        '_desc': '青色+品红霓虹，压暖色，深黑高对比',
+        '_tags': ['冷调', '电影感', '高对比', '高饱和'],
+        'SaturationAdjustmentRed':    -35,
+        'SaturationAdjustmentOrange': -42,
+        'SaturationAdjustmentYellow': -48,
+        'SaturationAdjustmentGreen':  -38,
+        'SaturationAdjustmentAqua':    88,
+        'SaturationAdjustmentBlue':    38,
+        'SaturationAdjustmentPurple':  48,
+        'SaturationAdjustmentMagenta': 68,
+        'HueAdjustmentRed':    0,
+        'HueAdjustmentOrange': 0,
+        'HueAdjustmentYellow': 0,
+        'HueAdjustmentGreen':  0,
+        'HueAdjustmentAqua':  -18,
+        'HueAdjustmentBlue':  -12,
+        'HueAdjustmentPurple':-10,
+        'HueAdjustmentMagenta':12,
+        'LuminanceAdjustmentAqua':   -10,
+        'LuminanceAdjustmentBlue':   -12,
+        'LuminanceAdjustmentMagenta': 5,
+        'Blacks': -48, 'Shadows': -22, 'Highlights': -28,
+        'Contrast': 58, 'Saturation': -15,
+    },
+    # ── 14. 哑光褪色 ──────────────────────────────────────────────────────────
+    'matte_fade': {
+        '_name': '哑光褪色',
+        '_desc': '提黑褪色，全通道轻度去饱和，低对比哑光质感',
+        '_tags': ['胶片感', '低饱和', '低反差'],
+        'SaturationAdjustmentRed':    -18,
+        'SaturationAdjustmentOrange': -15,
+        'SaturationAdjustmentYellow': -12,
+        'SaturationAdjustmentGreen':  -22,
+        'SaturationAdjustmentAqua':   -18,
+        'SaturationAdjustmentBlue':   -22,
+        'SaturationAdjustmentPurple': -15,
+        'SaturationAdjustmentMagenta':-12,
+        'HueAdjustmentRed':    5,
+        'HueAdjustmentOrange': 5,
+        'HueAdjustmentYellow': 3,
+        'HueAdjustmentGreen':  8,
+        'HueAdjustmentAqua':   5,
+        'HueAdjustmentBlue':   8,
+        'HueAdjustmentPurple': 5,
+        'HueAdjustmentMagenta':3,
+        'Blacks': 28, 'Shadows': 22, 'Highlights': -12,
+        'Contrast': -28, 'Saturation': -22, 'Vibrance': -8,
+    },
+    # ── 15. 高调清透 ──────────────────────────────────────────────────────────
+    'high_key': {
+        '_name': '高调清透',
+        '_desc': '整体提亮，低对比，干净清爽，适合白底产品/人像',
+        '_tags': ['低反差', '低饱和'],
+        'SaturationAdjustmentRed':    10,
+        'SaturationAdjustmentOrange': 12,
+        'SaturationAdjustmentYellow': -5,
+        'SaturationAdjustmentGreen':  -10,
+        'SaturationAdjustmentAqua':   -12,
+        'SaturationAdjustmentBlue':   -15,
+        'SaturationAdjustmentPurple': -10,
+        'SaturationAdjustmentMagenta':  5,
+        'HueAdjustmentRed':    3,
+        'HueAdjustmentOrange': 3,
+        'HueAdjustmentYellow': 0,
+        'HueAdjustmentGreen':  5,
+        'HueAdjustmentAqua':   5,
+        'HueAdjustmentBlue':   8,
+        'HueAdjustmentPurple': 3,
+        'HueAdjustmentMagenta':0,
+        'LuminanceAdjustmentRed':    18,
+        'LuminanceAdjustmentOrange': 12,
+        'LuminanceAdjustmentYellow': 10,
+        'LuminanceAdjustmentGreen':   5,
+        'Blacks': 22, 'Shadows': 38, 'Highlights': -10, 'Whites': 25,
+        'Contrast': -22, 'Saturation': -12, 'Vibrance': 8,
+    },
+    # ── 16. 戏剧人像 ──────────────────────────────────────────────────────────
+    'dramatic_portrait': {
+        '_name': '戏剧人像',
+        '_desc': '深黑高对比，强化橙色肤色，冷调背景形成分离感',
+        '_tags': ['暖色', '电影感', '高对比'],
+        'SaturationAdjustmentRed':    32,
+        'SaturationAdjustmentOrange': 58,
+        'SaturationAdjustmentYellow': 22,
+        'SaturationAdjustmentGreen':  -42,
+        'SaturationAdjustmentAqua':   -35,
+        'SaturationAdjustmentBlue':   -28,
+        'SaturationAdjustmentPurple': -20,
+        'SaturationAdjustmentMagenta':-15,
+        'HueAdjustmentRed':    5,
+        'HueAdjustmentOrange': 8,
+        'HueAdjustmentYellow': 3,
+        'HueAdjustmentGreen':  0,
+        'HueAdjustmentAqua':  -8,
+        'HueAdjustmentBlue':  -12,
+        'HueAdjustmentPurple': 0,
+        'HueAdjustmentMagenta':0,
+        'LuminanceAdjustmentOrange':  -8,
+        'LuminanceAdjustmentBlue':   -20,
+        'LuminanceAdjustmentGreen':  -15,
+        'Blacks': -58, 'Shadows': -38, 'Highlights': -30,
+        'Contrast': 68, 'Vibrance': 15,
+    },
+    # ── 17. 旅行鲜艳 ──────────────────────────────────────────────────────────
+    'vivid_travel': {
+        '_name': '旅行鲜艳',
+        '_desc': '全通道高饱和，鲜亮活力，适合旅行风光',
+        '_tags': ['高饱和', '自然绿'],
+        'SaturationAdjustmentRed':    25,
+        'SaturationAdjustmentOrange': 38,
+        'SaturationAdjustmentYellow': 42,
+        'SaturationAdjustmentGreen':  58,
+        'SaturationAdjustmentAqua':   45,
+        'SaturationAdjustmentBlue':   50,
+        'SaturationAdjustmentPurple': 22,
+        'SaturationAdjustmentMagenta': 18,
+        'HueAdjustmentRed':    0,
+        'HueAdjustmentOrange': 0,
+        'HueAdjustmentYellow': -5,
+        'HueAdjustmentGreen': -10,
+        'HueAdjustmentAqua':   -5,
+        'HueAdjustmentBlue':    5,
+        'HueAdjustmentPurple':  0,
+        'HueAdjustmentMagenta': 0,
+        'LuminanceAdjustmentGreen':  8,
+        'LuminanceAdjustmentAqua':   5,
+        'LuminanceAdjustmentBlue':  -5,
+        'Shadows': 12, 'Highlights': -18,
+        'Contrast': 15, 'Vibrance': 45, 'Saturation': 22,
+    },
+    # ── 18. 北欧冬日 ──────────────────────────────────────────────────────────
+    'nordic_winter': {
+        '_name': '北欧冬日',
+        '_desc': '冷蓝白调，暖色去饱和，低对比高明度，北欧简约',
+        '_tags': ['冷调', '低饱和', '低反差'],
+        'SaturationAdjustmentRed':    -28,
+        'SaturationAdjustmentOrange': -32,
+        'SaturationAdjustmentYellow': -22,
+        'SaturationAdjustmentGreen':  -18,
+        'SaturationAdjustmentAqua':    28,
+        'SaturationAdjustmentBlue':    38,
+        'SaturationAdjustmentPurple':  10,
+        'SaturationAdjustmentMagenta':-12,
+        'HueAdjustmentRed':    0,
+        'HueAdjustmentOrange': 0,
+        'HueAdjustmentYellow': 0,
+        'HueAdjustmentGreen':  8,
+        'HueAdjustmentAqua':   -5,
+        'HueAdjustmentBlue':  -12,
+        'HueAdjustmentPurple':  0,
+        'HueAdjustmentMagenta': 0,
+        'LuminanceAdjustmentBlue':   10,
+        'LuminanceAdjustmentAqua':    8,
+        'Blacks': 18, 'Shadows': 28, 'Highlights': -18, 'Whites': 12,
+        'Contrast': -18, 'Saturation': -18, 'Vibrance': -5,
+    },
+    # ── 19. 秋叶暖色 ──────────────────────────────────────────────────────────
+    'autumn_leaves': {
+        '_name': '秋叶暖色',
+        '_desc': '橙红黄浓郁，绿色偏黄褪去，蓝天轻压，秋日氛围',
+        '_tags': ['暖色', '高饱和'],
+        'SaturationAdjustmentRed':    55,
+        'SaturationAdjustmentOrange': 68,
+        'SaturationAdjustmentYellow': 50,
+        'SaturationAdjustmentGreen':  -42,
+        'SaturationAdjustmentAqua':   -30,
+        'SaturationAdjustmentBlue':   -32,
+        'SaturationAdjustmentPurple': -18,
+        'SaturationAdjustmentMagenta': 15,
+        'HueAdjustmentRed':    5,
+        'HueAdjustmentOrange': 8,
+        'HueAdjustmentYellow': -8,
+        'HueAdjustmentGreen':  22,
+        'HueAdjustmentAqua':  -5,
+        'HueAdjustmentBlue':   -8,
+        'HueAdjustmentPurple':  0,
+        'HueAdjustmentMagenta': 5,
+        'LuminanceAdjustmentOrange': 15,
+        'LuminanceAdjustmentYellow': 10,
+        'LuminanceAdjustmentGreen':  -8,
+        'Shadows': 12, 'Highlights': -20,
+        'Contrast': 22, 'Saturation': 12,
+    },
+    # ── 20. 都市青调 ──────────────────────────────────────────────────────────
+    'urban_teal': {
+        '_name': '都市青调',
+        '_desc': '青色主导，暖色适度压低，中对比，都市建筑感',
+        '_tags': ['青橙', '冷调'],
+        'SaturationAdjustmentRed':    -22,
+        'SaturationAdjustmentOrange': -28,
+        'SaturationAdjustmentYellow': -15,
+        'SaturationAdjustmentGreen':  -18,
+        'SaturationAdjustmentAqua':    68,
+        'SaturationAdjustmentBlue':    45,
+        'SaturationAdjustmentPurple':  15,
+        'SaturationAdjustmentMagenta':-20,
+        'HueAdjustmentRed':    0,
+        'HueAdjustmentOrange': 0,
+        'HueAdjustmentYellow': 0,
+        'HueAdjustmentGreen': -5,
+        'HueAdjustmentAqua':  -10,
+        'HueAdjustmentBlue':  -15,
+        'HueAdjustmentPurple': 0,
+        'HueAdjustmentMagenta':0,
+        'LuminanceAdjustmentAqua':  -10,
+        'LuminanceAdjustmentBlue':  -12,
+        'Blacks': -30, 'Shadows': -18, 'Highlights': -25,
+        'Contrast': 38, 'Saturation': -10,
+    },
 }
 
 # ─── 运行时用户聚类存储 ───────────────────────────────────────────────────────
@@ -352,15 +747,19 @@ def _merge_cluster(key: str, new_params: dict) -> None:
 
 
 def _find_closest_user(vec: np.ndarray) -> tuple:
-    """在用户聚类中找余弦最近邻，返回 (key, similarity)"""
+    """
+    在用户聚类中找余弦最近邻，返回 (key, similarity)。
+    当新向量本身幅度很小（<4.0）时跳过合并判断，防止近零向量之间
+    产生虚假高相似度（两个不同的"微调"预设都接近零，余弦却可达 0.9+）。
+    """
     qnorm = np.linalg.norm(vec)
-    if qnorm < 1e-6 or not _user_styles:
+    if qnorm < 4.0 or not _user_styles:   # 幅度太小 → 不参与合并
         return None, 0.0
     best_key, best_sim = None, -1.0
     for key, cluster in _user_styles.items():
         svec  = _style_vector(cluster['params'])
         snorm = np.linalg.norm(svec)
-        if snorm < 1e-6:
+        if snorm < 4.0:   # 原型幅度也太小 → 跳过，避免噪声干扰
             continue
         sim = float(np.dot(vec, svec) / (qnorm * snorm))
         if sim > best_sim:
