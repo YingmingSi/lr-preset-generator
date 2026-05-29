@@ -2,11 +2,12 @@
 Lightroom预设生成器 - FastAPI主应用
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 import sys
 import os
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -285,6 +286,75 @@ async def clear_calibration():
     """清除校准数据，恢复使用内置默认范围"""
     reset_calibration()
     return JSONResponse({"success": True, "calibration": calib_summary()})
+
+
+# ── 数据导出 / 导入（用于 Railway ↔ 本地同步）──────────────────────────────
+
+@app.get("/data/export")
+async def export_data():
+    """
+    导出所有学习数据为单个 JSON（校准参数 + 动作基 + 风格库）。
+    可下载后导入到其他环境（本地 ↔ Railway 双向同步）。
+    """
+    from modules.action_basis    import _learned_actions
+    from modules.calibration     import _calib
+    from modules.preset_library  import _user_styles
+
+    payload = {
+        "version":         "1.0",
+        "exported_at":     datetime.now(timezone.utc).isoformat(),
+        "calibration":     _calib,
+        "learned_actions": _learned_actions,
+        "user_styles":     _user_styles,
+    }
+    return Response(
+        content=__import__('json').dumps(payload, ensure_ascii=False, indent=2).encode('utf-8'),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="lr_preset_data.json"'},
+    )
+
+
+@app.post("/data/import")
+async def import_data(payload: dict = Body(...)):
+    """
+    导入学习数据，覆盖当前状态。
+    接受 /data/export 导出的 JSON 格式。
+    """
+    from modules import calibration as _cal, action_basis as _ab, preset_library as _pl
+
+    errors = []
+
+    if "calibration" in payload:
+        try:
+            _cal._calib = payload["calibration"]
+            _cal.save_calibration()
+        except Exception as e:
+            errors.append(f"calibration: {e}")
+
+    if "learned_actions" in payload:
+        try:
+            _ab._learned_actions = payload["learned_actions"]
+            _ab._invalidate_cache()
+            _ab.save_learned()
+        except Exception as e:
+            errors.append(f"learned_actions: {e}")
+
+    if "user_styles" in payload:
+        try:
+            _pl._user_styles = payload["user_styles"]
+            _pl.save_user_styles()
+        except Exception as e:
+            errors.append(f"user_styles: {e}")
+
+    return JSONResponse({
+        "success":   len(errors) == 0,
+        "errors":    errors,
+        "summary": {
+            "calibration_params": len(_cal._calib),
+            "learned_actions":    len(_ab._learned_actions),
+            "user_styles":        len(_pl._user_styles),
+        },
+    })
 
 
 if __name__ == "__main__":

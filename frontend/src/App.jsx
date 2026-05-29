@@ -58,7 +58,8 @@ export default function App() {
   const [calibration,        setCalibration]        = useState(null);
   const [uploadingPresets,   setUploadingPresets]   = useState(false);
   const [uploadResult,       setUploadResult]       = useState(null);
-  const xmpInputRef = useRef();
+  const xmpInputRef    = useRef();
+  const importDataRef  = useRef();
 
   const refInputRef = useRef();
   const srcInputRef = useRef();
@@ -76,6 +77,8 @@ export default function App() {
     if (!files?.length) return;
     setUploadingPresets(true);
     setUploadResult(null);
+    setLibraryOpen(true);          // 自动展开面板，确保反馈可见
+    if (!libraryStyles) loadLibrary();  // 首次展开时拉取库列表
     const form = new FormData();
     for (const f of files) form.append("preset_files", f);
     try {
@@ -96,6 +99,44 @@ export default function App() {
       await fetch(`${API_BASE}/calibration`, { method: "DELETE" });
       setCalibration({ calibrated: false, xmp_count: 0, param_count: 0, key_ranges: {} });
     } catch {}
+  };
+
+  const exportData = async () => {
+    try {
+      const res  = await fetch(`${API_BASE}/data/export`);
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = `lr_preset_data_${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("导出失败：" + e.message);
+    }
+  };
+
+  const importData = async (file) => {
+    if (!file) return;
+    try {
+      const text    = await file.text();
+      const payload = JSON.parse(text);
+      const res     = await fetch(`${API_BASE}/data/import`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await loadLibrary();
+        setUploadResult({ _import: true, summary: data.summary });
+        setLibraryOpen(true);
+      } else {
+        alert("导入出错：" + data.errors?.join(", "));
+      }
+    } catch (e) {
+      alert("导入失败：" + e.message);
+    }
   };
 
   const handleFile = useCallback((file, type) => {
@@ -193,6 +234,9 @@ export default function App() {
           <input ref={xmpInputRef} type="file" accept=".xmp" multiple
             style={{ display: "none" }}
             onChange={e => uploadPresets(Array.from(e.target.files))} />
+          <input ref={importDataRef} type="file" accept=".json"
+            style={{ display: "none" }}
+            onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
 
           {/* Options row */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
@@ -271,7 +315,10 @@ export default function App() {
           >
             <div style={{ fontSize: "11px", letterSpacing: "0.14em", color: COLORS.textDim, fontFamily: "monospace" }}>
               风格模板库
-              {libraryStyles && <span style={{ marginLeft: "10px", color: COLORS.textMuted }}>· {libraryStyles.length} 个模板</span>}
+              {uploadingPresets
+                ? <span style={{ marginLeft: "10px", color: COLORS.accent }}>· 导入中…</span>
+                : libraryStyles && <span style={{ marginLeft: "10px", color: COLORS.textMuted }}>· {libraryStyles.length} 个模板</span>
+              }
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
               <button
@@ -286,6 +333,24 @@ export default function App() {
               >
                 {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
               </button>
+              <button
+                onClick={e => { e.stopPropagation(); exportData(); }}
+                title="导出学习数据（校准 + 动作基 + 风格库）"
+                style={{
+                  background: "none", border: `1px solid ${COLORS.border}`,
+                  color: COLORS.textMuted, padding: "4px 10px",
+                  fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
+                }}
+              >↓ 导出</button>
+              <button
+                onClick={e => { e.stopPropagation(); importDataRef.current?.click(); }}
+                title="导入学习数据（从其他环境同步）"
+                style={{
+                  background: "none", border: `1px solid ${COLORS.border}`,
+                  color: COLORS.textMuted, padding: "4px 10px",
+                  fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
+                }}
+              >↑ 同步</button>
               <span style={{ color: COLORS.textMuted, fontSize: "11px", fontFamily: "monospace" }}>
                 {libraryOpen ? "▲" : "▼"}
               </span>
@@ -303,6 +368,12 @@ export default function App() {
                 }}>
                   {uploadResult.error ? (
                     <span style={{ color: "#e08080" }}>✗ {uploadResult.error}</span>
+                  ) : uploadResult._import ? (
+                    <span style={{ color: COLORS.success }}>
+                      ✓ 同步完成 · 校准 {uploadResult.summary?.calibration_params ?? 0} 个参数 ·{" "}
+                      学习动作 {uploadResult.summary?.learned_actions ?? 0} 个 ·{" "}
+                      风格 {uploadResult.summary?.user_styles ?? 0} 个
+                    </span>
                   ) : (
                     <>
                       <span style={{ color: COLORS.success }}>✓ 已处理 {uploadResult.imported} 个文件</span>
