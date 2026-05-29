@@ -64,7 +64,7 @@ app.add_middleware(
     allow_origins=[
         "https://lr-preset-generator.vercel.app",
     ],
-    allow_origin_regex=r"http://localhost:\d+",   # 允许本地任意端口
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",  # 允许本地任意端口（localhost 和 127.0.0.1）
     allow_methods=["*"],
     allow_headers=["*"],
 )
