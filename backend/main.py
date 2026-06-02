@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(__file__))
 
 from typing import List
+import numpy as np
 
 from modules.image_loader import load_image
 from modules.luminance_analyzer import analyze_luminance, apply_luminance_linkage
@@ -95,6 +96,18 @@ async def analyze(
         ref_data = load_image(ref_bytes, ref_image.filename or "ref.jpg")
         src_data = load_image(src_bytes, src_image.filename or "src.jpg") if src_bytes else None
         mode     = "B_dual" if src_data else "A_single"
+
+        # 对齐 src 和 ref 的空间维度（防止尺寸不匹配导致的数组索引错误）
+        if src_data is not None and src_data['rgb_float'].shape != ref_data['rgb_float'].shape:
+            from scipy.ndimage import zoom
+            h_ref, w_ref = ref_data['rgb_float'].shape[:2]
+            h_src, w_src = src_data['rgb_float'].shape[:2]
+            if (h_src, w_src) != (h_ref, w_ref):
+                scale = (h_ref / h_src, w_ref / w_src)
+                src_data['rgb_float'] = np.stack([
+                    zoom(src_data['rgb_float'][:, :, c], scale, order=1)
+                    for c in range(3)
+                ], axis=2)
 
         luminance_params = analyze_luminance(ref_data, src_data)
         luminance_params = apply_luminance_linkage(luminance_params)

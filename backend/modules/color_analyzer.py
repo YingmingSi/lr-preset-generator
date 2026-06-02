@@ -262,7 +262,18 @@ def _analyze_color_grading_diff(ref_rgb: np.ndarray,
             return 0, 0
         ref_mean = np.array([ref_rgb[:, :, c][mask].mean() for c in range(3)])
         if src_rgb is not None:
-            src_mean = np.array([src_rgb[:, :, c][mask].mean() for c in range(3)])
+            # 对齐 src_rgb 尺寸到 ref_rgb（如果用户上传的两张图大小不同）
+            if src_rgb.shape[:2] != ref_rgb.shape[:2]:
+                from scipy.ndimage import zoom
+                scale_h = ref_rgb.shape[0] / src_rgb.shape[0]
+                scale_w = ref_rgb.shape[1] / src_rgb.shape[1]
+                src_rgb_aligned = np.array([
+                    zoom(src_rgb[:, :, c], (scale_h, scale_w), order=1)
+                    for c in range(3)
+                ]).transpose(1, 2, 0)
+            else:
+                src_rgb_aligned = src_rgb
+            src_mean = np.array([src_rgb_aligned[:, :, c][mask].mean() for c in range(3)])
             delta    = ref_mean - src_mean          # 需要"加入"多少色彩
         else:
             delta = ref_mean - ref_mean.mean()      # 单图：相对中性基准
