@@ -59,11 +59,11 @@ PARAM_DISTRIBUTIONS = {
     'SplitToningShadowHue':           {'type': 'circular_cluster',
                                         'clusters': [210, 38, 0],  # 蓝/橙/无色
                                         'spread': 30},
-    'SplitToningShadowSaturation':    {'type': 'zero_heavy', 'lo': 0, 'hi': 30},
+    'SplitToningShadowSaturation':    {'type': 'zero_heavy', 'lo': 0, 'hi': 15},
     'SplitToningHighlightHue':        {'type': 'circular_cluster',
                                         'clusters': [38, 210, 0],
                                         'spread': 25},
-    'SplitToningHighlightSaturation': {'type': 'zero_heavy', 'lo': 0, 'hi': 25},
+    'SplitToningHighlightSaturation': {'type': 'zero_heavy', 'lo': 0, 'hi': 15},
 }
 
 # 最终 CNN 预测的参数列表（与模型输出维度对应）

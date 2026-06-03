@@ -170,6 +170,10 @@ class CNNParameterPredictor:
             for name, value in zip(self.PARAM_NAMES, pred_np)
         }
 
+        # 约束：SplitToning 饱和度最大 15
+        params_dict['SplitToningShadowSaturation'] = min(params_dict['SplitToningShadowSaturation'], 15.0)
+        params_dict['SplitToningHighlightSaturation'] = min(params_dict['SplitToningHighlightSaturation'], 15.0)
+
         return params_dict
 
     def predict_batch(

@@ -131,6 +131,9 @@ def _extract_flat_params(params: dict) -> dict:
         if k in ('wb_confidence', 'is_complementary_grading'):
             continue
         if k in DEFAULT_PARAMS:
+            # 约束：SplitToning 饱和度最大 15
+            if k in ('SplitToningShadowSaturation', 'SplitToningHighlightSaturation'):
+                v = min(int(v), 15)
             result[k] = v
     return result
 
