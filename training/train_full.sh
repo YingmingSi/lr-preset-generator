@@ -122,7 +122,7 @@ check_photos() {
         exit 1
     fi
 
-    PHOTO_COUNT=$(find ./photos -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.raw" -o -iname "*.cr2" -o -iname "*.nef" -o -iname "*.arw" -o -iname "*.dng" \) | wc -l)
+    PHOTO_COUNT=$(find ./photos -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.raw" -o -iname "*.cr2" -o -iname "*.cr3" -o -iname "*.nef" -o -iname "*.arw" -o -iname "*.dng" \) | wc -l)
 
     if [ $PHOTO_COUNT -lt 100 ]; then
         echo -e "${RED}❌ 照片不足：$PHOTO_COUNT 张（需要至少 100 张）${NC}"
