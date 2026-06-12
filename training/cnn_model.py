@@ -27,10 +27,11 @@ class ParamPredictor(nn.Module):
         super().__init__()
 
         # 双分支：都用相同的骨干网络（Siamese 架构）
+        weights = 'DEFAULT' if pretrained else None
         if backbone == 'resnet18':
-            base_model = models.resnet18(pretrained=pretrained)
+            base_model = models.resnet18(weights=weights)
         elif backbone == 'resnet34':
-            base_model = models.resnet34(pretrained=pretrained)
+            base_model = models.resnet34(weights=weights)
         else:
             raise ValueError(f"未支持的 backbone: {backbone}")
 
@@ -97,10 +98,11 @@ class ParamPredictorWithSkip(nn.Module):
     def __init__(self, backbone: str = 'resnet18', pretrained: bool = True):
         super().__init__()
 
+        weights = 'DEFAULT' if pretrained else None
         if backbone == 'resnet18':
-            base_model = models.resnet18(pretrained=pretrained)
+            base_model = models.resnet18(weights=weights)
         elif backbone == 'resnet34':
-            base_model = models.resnet34(pretrained=pretrained)
+            base_model = models.resnet34(weights=weights)
         else:
             raise ValueError(f"未支持的 backbone: {backbone}")
 
