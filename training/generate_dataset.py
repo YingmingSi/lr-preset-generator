@@ -96,21 +96,22 @@ def sample_params(calibration: dict = None) -> dict:
             lo_ext, hi_ext = lo - span * 0.3, hi + span * 0.3
             val = random.uniform(lo_ext, hi_ext)
         else:
-            lo, hi = dist['lo'], dist['hi']
-            if dist['type'] == 'uniform':
-                val = random.uniform(lo, hi)
-            elif dist['type'] == 'skew_neg':
-                # 偏负值（真实预设的典型分布）
-                val = random.triangular(lo, hi, lo + (hi - lo) * 0.2)
-            elif dist['type'] == 'zero_heavy':
-                # 70% 概率为 0（许多预设不调这个参数）
-                val = 0 if random.random() < 0.7 else random.uniform(lo, hi)
-            elif dist['type'] == 'circular_cluster':
+            if dist['type'] == 'circular_cluster':
                 # SplitToning Hue：集中在几个常用角度附近
                 cluster = random.choice(dist['clusters'])
                 val = (cluster + random.gauss(0, dist['spread'])) % 360
             else:
-                val = random.uniform(lo, hi)
+                lo, hi = dist['lo'], dist['hi']
+                if dist['type'] == 'uniform':
+                    val = random.uniform(lo, hi)
+                elif dist['type'] == 'skew_neg':
+                    # 偏负值（真实预设的典型分布）
+                    val = random.triangular(lo, hi, lo + (hi - lo) * 0.2)
+                elif dist['type'] == 'zero_heavy':
+                    # 70% 概率为 0（许多预设不调这个参数）
+                    val = 0 if random.random() < 0.7 else random.uniform(lo, hi)
+                else:
+                    val = random.uniform(lo, hi)
 
         # 整数化
         if name == 'Exposure':
