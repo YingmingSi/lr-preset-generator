@@ -149,11 +149,11 @@ class Trainer:
         }
 
         return {
-            'loss': avg_loss,
-            'mae': mae,
-            'rmse': rmse,
-            'r2_mean': r2_mean,
-            'r2_scores': r2_scores.tolist(),
+            'loss': float(avg_loss),
+            'mae': float(mae),
+            'rmse': float(rmse),
+            'r2_mean': float(r2_mean),
+            'r2_scores': [float(x) for x in r2_scores],
             'param_mae': param_mae,
         }
 
