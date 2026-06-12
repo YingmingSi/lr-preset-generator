@@ -222,7 +222,7 @@ def generate(src_dir: str, out_dir: str,
         print(f'使用用户校准分布: {calib_path}')
 
     # 收集源图
-    exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.raw', '.cr2',
+    exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.raw', '.cr2', '.cr3',
             '.nef', '.arw', '.dng', '.raf'}
     src_files = [str(p) for p in Path(src_dir).rglob('*')
                  if p.suffix.lower() in exts]
