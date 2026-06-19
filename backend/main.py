@@ -35,10 +35,13 @@ load_cnn()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://lr-preset-generator.vercel.app",
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    # 允许：
+    #   - 任意 Vercel 子域名（包括 preview deployments）
+    #   - 本地开发（localhost / 127.0.0.1 任意端口）
+    allow_origin_regex=(
+        r"https://[a-zA-Z0-9-]+\.vercel\.app"
+        r"|http://(localhost|127\.0\.0\.1):\d+"
+    ),
     allow_methods=["*"],
     allow_headers=["*"],
 )

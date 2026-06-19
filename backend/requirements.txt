@@ -5,5 +5,8 @@ Pillow
 numpy
 scikit-image
 rawpy
+
+# PyTorch CPU-only（生产部署用，体积从 ~2GB 缩到 ~200MB）
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision
