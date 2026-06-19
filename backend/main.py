@@ -1,247 +1,165 @@
 """
-Lightroom预设生成器 - FastAPI主应用
+LR 预设生成器 - FastAPI 主应用（CNN 纯净版）
+
+工作流：
+  上传 ref（必须）+ src（可选） → CNN 预测 22 维参数 → 生成 XMP
+
+如果只有 ref（单图模式），退化到传统色彩分析。
+如果有 src + ref（双图模式），CNN 提供权威预测。
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 import sys
 import os
-from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from typing import List
 import numpy as np
 
 from modules.image_loader import load_image
 from modules.luminance_analyzer import analyze_luminance, apply_luminance_linkage
 from modules.color_analyzer import analyze_color
-from modules.scene_analyzer import analyze_scene_and_correct
-from modules.camera_profiles import apply_camera_compensation, get_camera_description
 from modules.xmp_generator import generate_xmp, params_summary
-from modules.preset_renderer import render_and_validate
-from modules.preset_library import (
-    load_user_styles, add_user_preset, add_user_preset_incremental,
-    list_styles, parse_xmp_params,
-    reset_user_styles, batch_cluster, BATCH_KMEANS_MIN, promote_to_seeded,
-    decompose_seeded_styles, find_closest_seeded_style, get_style_action_weights,
-    rename_seeded_styles,
-)
-from modules.calibration import (
-    load_calibration, apply_calibration, is_calibrated,
-    update_from_params_list, get_summary as calib_summary, reset_calibration,
-)
-from modules.action_basis import (
-    load_learned, decompose as action_decompose, compose as action_compose,
-    top_actions, learn_from_uploads, get_action_info, reset_learned,
-    derive_user_actions, has_user_actions, mix_weights_with_style_prior,
+from modules.cnn_predictor import (
+    load_predictor as load_cnn, predict_params as cnn_predict,
+    is_predictor_loaded as cnn_ready,
 )
 
-# 上传接口开关：默认开启；Railway 生产环境设 DISABLE_PRESET_UPLOAD=true 关闭
-UPLOAD_ENABLED = os.getenv("DISABLE_PRESET_UPLOAD", "false").lower() != "true"
 
-app = FastAPI(title="LR Preset Generator", version="1.0.0")
+app = FastAPI(title="LR Preset Generator", version="2.0.0")
 
-# 启动时加载用户预设库、校准数据、已学习动作
-load_user_styles()
-load_calibration()
-load_learned()
-
-def _ensure_style_weights() -> None:
-    """补全 seeded_styles 中缺失的 action_weights（兼容旧 seeded_styles.json）"""
-    import modules.preset_library as _pl
-    needs = any(
-        'action_weights' not in v
-        for v in _pl._seeded_styles.values()
-        if isinstance(v, dict) and 'params' in v
-    )
-    if needs:
-        decompose_seeded_styles()
-
-_ensure_style_weights()
+# 启动时加载 CNN 模型
+load_cnn()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://lr-preset-generator.vercel.app",
     ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",  # 允许本地任意端口（localhost 和 127.0.0.1）
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+def _inject_cnn_params(luminance_params: dict, color_params: dict, cnn_params: dict):
+    """把 CNN 预测的 22 维参数注入到 luminance/color 字典"""
+    LUM_KEYS = ('Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites',
+                'Contrast', 'Clarity')
+    COLOR_KEYS = ('Saturation', 'Vibrance',
+                  'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
+                  'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
+                  'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
+                  'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
+                  'SplitToningShadowHue', 'SplitToningShadowSaturation',
+                  'SplitToningHighlightHue', 'SplitToningHighlightSaturation')
+
+    for k in LUM_KEYS:
+        if k in cnn_params:
+            luminance_params[k] = cnn_params[k]
+    for k in COLOR_KEYS:
+        if k in cnn_params:
+            color_params[k] = cnn_params[k]
+
+
+def _align_src_to_ref(src_data, ref_data):
+    """如果 src 和 ref 尺寸不一致，把 src resize 到 ref 的尺寸"""
+    if src_data is None or src_data['rgb_float'].shape == ref_data['rgb_float'].shape:
+        return src_data
+    from scipy.ndimage import zoom
+    h_ref, w_ref = ref_data['rgb_float'].shape[:2]
+    h_src, w_src = src_data['rgb_float'].shape[:2]
+    scale = (h_ref / h_src, w_ref / w_src)
+    src_data['rgb_float'] = np.stack([
+        zoom(src_data['rgb_float'][:, :, c], scale, order=1)
+        for c in range(3)
+    ], axis=2)
+    return src_data
+
+
+def _predict_with_cnn(src_data, ref_data):
+    """运行 CNN 推理；失败时返回 None"""
+    if src_data is None or not cnn_ready():
+        return None
+    try:
+        src_rgb = (src_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
+        ref_rgb = (ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
+        return cnn_predict(src_rgb, ref_rgb)
+    except Exception as e:
+        print(f"⚠ CNN 预测失败: {e}")
+        return None
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "cnn_loaded": cnn_ready(),
+        "cnn_model": "color_cnn_v4 (R²=0.73)" if cnn_ready() else None,
+    }
 
 
 @app.post("/analyze")
 async def analyze(
-    ref_image:      UploadFile = File(...),
-    src_image:      UploadFile = File(None),
-    preset_name:    str = Form("AI生成预设"),
-    ref_scene_type: str = Form("auto"),
-    src_scene_type: str = Form("auto"),
-    camera_brand:   str = Form(""),
+    ref_image:    UploadFile = File(...),
+    src_image:    UploadFile = File(None),
+    preset_name:  str = Form("AI生成预设"),
 ):
     ref_bytes = await ref_image.read()
     src_bytes = await src_image.read() if src_image else None
 
-    if len(ref_bytes) == 0:
+    if not ref_bytes:
         raise HTTPException(400, "参考图不能为空")
 
     try:
         ref_data = load_image(ref_bytes, ref_image.filename or "ref.jpg")
         src_data = load_image(src_bytes, src_image.filename or "src.jpg") if src_bytes else None
+        src_data = _align_src_to_ref(src_data, ref_data)
         mode     = "B_dual" if src_data else "A_single"
 
-        # 对齐 src 和 ref 的空间维度（防止尺寸不匹配导致的数组索引错误）
-        if src_data is not None and src_data['rgb_float'].shape != ref_data['rgb_float'].shape:
-            from scipy.ndimage import zoom
-            h_ref, w_ref = ref_data['rgb_float'].shape[:2]
-            h_src, w_src = src_data['rgb_float'].shape[:2]
-            if (h_src, w_src) != (h_ref, w_ref):
-                scale = (h_ref / h_src, w_ref / w_src)
-                src_data['rgb_float'] = np.stack([
-                    zoom(src_data['rgb_float'][:, :, c], scale, order=1)
-                    for c in range(3)
-                ], axis=2)
+        # CNN 预测（双图模式）
+        cnn_params = _predict_with_cnn(src_data, ref_data)
 
+        # 传统色彩/亮度分析（始终运行 — 提供 tone_curve、HSL 基础值等）
         luminance_params = analyze_luminance(ref_data, src_data)
         luminance_params = apply_luminance_linkage(luminance_params)
         color_params     = analyze_color(ref_data, src_data)
 
-        camera_note = ""
-        if camera_brand:
-            color_params = apply_camera_compensation(color_params, camera_brand)
-            camera_note  = get_camera_description(camera_brand)
+        # CNN 覆盖（如果可用，CNN 是 22 维参数的权威源）
+        if cnn_params is not None:
+            _inject_cnn_params(luminance_params, color_params, cnn_params)
 
-        scene_result = analyze_scene_and_correct(
-            ref_bytes,
-            {**luminance_params, **color_params},
-            src_bytes,
-            ref_scene_type=ref_scene_type,
-            src_scene_type=src_scene_type,
-        )
-
-        # ── 校准约束 ──────────────────────────────────────────────────────
-        if is_calibrated():
-            luminance_params = apply_calibration(luminance_params)
-            color_params     = apply_calibration(color_params)
-        # ─────────────────────────────────────────────────────────────────
-
-        # ── 动作基底分解 + 风格先验混合 + 合成 ──────────────────────────────
-        raw_combined = {**luminance_params, **color_params,
-                        **scene_result.get('params', {})}
-        action_weights, action_r2 = action_decompose(raw_combined)
-
-        # 风格先验：仅用于诊断展示，不参与参数计算
-        # （先验混合会将分析结果向用户历史风格偏移，牺牲还原精度）
-        best_style_key, best_style_sim, best_style_info = find_closest_seeded_style(raw_combined)
-        style_note = ""
-        if best_style_key and best_style_sim > 0.50:
-            style_note = f"参考风格: {best_style_info.get('name', best_style_key)} ({round(best_style_sim*100)}%)"
-
-        composed = action_compose(action_weights, raw_combined, r2=action_r2)
-        # 将合成结果写回（HSL + 亮度均更新）
-        for k, v in composed.items():
-            if k in luminance_params:
-                luminance_params[k] = v
-            elif k in color_params or any(k.startswith(p) for p in
-                 ('HueAdjustment', 'SaturationAdjustment', 'LuminanceAdjustment',
-                  'Saturation', 'Vibrance')):
-                color_params[k] = v
-        action_top = top_actions(action_weights)
-        # ─────────────────────────────────────────────────────────────────
-
-        # ── 自我验证与自动修正（仅双图模式）─────────────────────────────
-        validation   = {}
-        preview_b64  = None
-        if src_data is not None:
-            # 迭代自验证：最多 4 轮，每轮基于残差继续修正
-            # 每轮修正量随迭代递减（阻尼因子），防止震荡
-            MAX_ITER    = 4
-            DAMPING     = [1.0, 0.6, 0.35, 0.20]
-            all_params  = {**luminance_params, **color_params, **scene_result.get('params', {})}
-            total_corrections: dict = {}
-            preview_b64 = None
-            validation  = {}
-
-            for iter_i in range(MAX_ITER):
-                tone_curve = luminance_params.get('tone_curve',
-                             [(0,0),(64,64),(128,128),(192,192),(255,255)])
-                val = render_and_validate(
-                    src_data['rgb_float'],
-                    ref_data['rgb_float'],
-                    all_params,
-                    tone_curve,
-                )
-                raw_corr = {k: v for k, v in val.get('corrections', {}).items()
-                            if not k.startswith('_')}
-
-                # 阻尼：后轮修正幅度缩小
-                damp = DAMPING[iter_i]
-                corr = {k: (int(round(v * damp)) if isinstance(v, (int, float)) else v)
-                        for k, v in raw_corr.items()}
-
-                if not corr:
-                    break   # 已收敛
-
-                # 应用修正到 all_params
-                scene_result['params'].update(corr)
-                all_params = {**luminance_params, **color_params, **scene_result.get('params', {})}
-                total_corrections.update(corr)
-
-                # 最后一次迭代保留预览
-                if iter_i == MAX_ITER - 1 or not corr:
-                    preview_b64 = val.pop('preview_b64', None)
-                    validation  = {k: v for k, v in val.items() if k != 'corrections'}
-
-            validation['corrections_applied'] = list(total_corrections.keys())
-            color_cast = val.get('corrections', {}).get('_color_cast_note', '') if val else ''
-            if color_cast:
-                validation['color_cast_note'] = color_cast
-        # ─────────────────────────────────────────────────────────────────
-
-        xmp_content = generate_xmp(luminance_params, color_params, scene_result, preset_name=preset_name)
-        summary     = params_summary(luminance_params, color_params, scene_result)
+        # 生成 XMP + 参数摘要
+        empty_scene = {'params': {}, 'report': {}}
+        xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
+                                    preset_name=preset_name)
+        summary     = params_summary(luminance_params, color_params, empty_scene)
         curve_style = luminance_params.get('_curve_style', '')
 
-        response_data = {
+        return JSONResponse({
             "success":              True,
             "mode":                 mode,
-            "report":               scene_result.get('report', {}),
             "summary":              summary,
             "xmp_content":          xmp_content,
             "compression_detected": ref_data.get('compression_suspected', False),
             "is_raw_source":        src_data.get('is_raw', False) if src_data else False,
-            "camera_note":          camera_note,
             "curve_style":          curve_style,
-            "validation":           validation,
-            "action_top":           action_top,
-            "action_r2":            round(action_r2, 3),
-            "style_note":           style_note,
-            "calibration":          calib_summary(),
-        }
-        if preview_b64:
-            response_data["preview_b64"] = preview_b64
+            "cnn_used":             cnn_params is not None,
+        })
 
-        return JSONResponse(response_data)
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"分析失败：{str(e)}")
 
 
 @app.post("/download_xmp")
 async def download_xmp(
-    ref_image:      UploadFile = File(...),
-    src_image:      UploadFile = File(None),
-    preset_name:    str = Form("AI生成预设"),
-    ref_scene_type: str = Form("auto"),
-    src_scene_type: str = Form("auto"),
-    camera_brand:   str = Form(""),
+    ref_image:    UploadFile = File(...),
+    src_image:    UploadFile = File(None),
+    preset_name:  str = Form("AI生成预设"),
 ):
     ref_bytes = await ref_image.read()
     src_bytes = await src_image.read() if src_image else None
@@ -249,248 +167,30 @@ async def download_xmp(
     try:
         ref_data = load_image(ref_bytes, ref_image.filename or "ref.jpg")
         src_data = load_image(src_bytes, src_image.filename or "src.jpg") if src_bytes else None
+        src_data = _align_src_to_ref(src_data, ref_data)
+
+        cnn_params = _predict_with_cnn(src_data, ref_data)
 
         luminance_params = analyze_luminance(ref_data, src_data)
         luminance_params = apply_luminance_linkage(luminance_params)
         color_params     = analyze_color(ref_data, src_data)
 
-        if camera_brand:
-            color_params = apply_camera_compensation(color_params, camera_brand)
+        if cnn_params is not None:
+            _inject_cnn_params(luminance_params, color_params, cnn_params)
 
-        if is_calibrated():
-            luminance_params = apply_calibration(luminance_params)
-            color_params     = apply_calibration(color_params)
-
-        scene_result = analyze_scene_and_correct(
-            ref_bytes,
-            {**luminance_params, **color_params},
-            src_bytes,
-            ref_scene_type=ref_scene_type,
-            src_scene_type=src_scene_type,
-        )
-
-        xmp_content = generate_xmp(luminance_params, color_params, scene_result, preset_name=preset_name)
+        empty_scene = {'params': {}, 'report': {}}
+        xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
+                                    preset_name=preset_name)
         safe_name   = preset_name.replace(' ', '_').replace('/', '_')
 
         return Response(
             content=xmp_content.encode('utf-8'),
             media_type="application/xml",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.xmp"'}
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.xmp"'},
         )
 
     except Exception as e:
         raise HTTPException(500, str(e))
-
-
-@app.post("/upload_presets")
-async def upload_presets(preset_files: List[UploadFile] = File(...)):
-    """上传 XMP 预设文件（仅本地/管理员环境开放）"""
-    if not UPLOAD_ENABLED:
-        raise HTTPException(403, "预设上传在此部署环境中已禁用")
-
-    # ── 解析所有文件 ──────────────────────────────────────────────────────────
-    parsed = []   # [{filename, params}]
-    for f in preset_files:
-        if not f.filename.lower().endswith('.xmp'):
-            continue
-        content     = (await f.read()).decode('utf-8', errors='ignore')
-        params      = parse_xmp_params(content)
-        if params:
-            parsed.append({'filename': f.filename, 'params': params})
-
-    params_batch = [p['params'] for p in parsed]
-    filenames    = [p['filename'] for p in parsed]
-
-    # ── 风格聚类 ──────────────────────────────────────────────────────────────
-    is_bulk = len(parsed) >= BATCH_KMEANS_MIN
-
-    if is_bulk:
-        # 批量首次建库：K-means 全局分组
-        cluster_results  = batch_cluster(params_batch, filenames)
-        cluster_mode     = f"批量 K-means ({len(parsed)} 个文件 → {len(cluster_results)} 个聚类)"
-        preset_summaries = cluster_results
-    else:
-        # 增量添加：严格阈值 0.95，新风格始终新建不强制合并
-        preset_summaries = []
-        for p in parsed:
-            summary = add_user_preset_incremental(p['params'], p['filename'])
-            preset_summaries.append(summary)
-        cluster_mode = f"增量模式 ({len(parsed)} 个文件，新风格独立保留)"
-
-    # ── 更新校准范围 ─────────────────────────────────────────────────────────
-    calib_report = {}
-    if params_batch:
-        calib_report = update_from_params_list(params_batch)
-
-    # ── 动作库更新 ────────────────────────────────────────────────────────────
-    # 批量首次建库：全量 PCA（直接 PCA），动作量级 = 真实调色幅度
-    #   已能覆盖大部分方差，不再叠加残差 PCA（避免冗余）
-    # 增量少量上传：残差 PCA（只补充现有基底覆盖不到的新方向）
-    learned_new = {}
-    if is_bulk:
-        reset_learned()                          # 清除旧残差动作（基于旧基底，已失效）
-        derive_user_actions(params_batch)        # 全量 PCA → user_actions.json
-    elif len(params_batch) >= 3:
-        learned_new = learn_from_uploads(        # 残差 PCA → 仅补充新方向
-            params_batch, min_samples=3, var_threshold=0.10
-        )
-
-    return JSONResponse({
-        "success":        True,
-        "imported":       len(parsed),
-        "cluster_mode":   cluster_mode,
-        "presets":        preset_summaries,
-        "library":        list_styles(),
-        "calibration":    calib_summary(),
-        "calib_updated":  len(calib_report),
-        "actions":        get_action_info(),
-        "learned_new":    [v.get('_label', k) for k, v in learned_new.items()],
-    })
-
-
-@app.post("/styles/seed")
-async def seed_styles():
-    """
-    固化当前学习状态：
-    · seeded_styles.json  — K-means 风格聚类 + 每个风格的动作权重分解
-    · user_actions.json   — PCA 动作基底（生成参考）
-    · calibration.json    — 参数范围约束
-
-    固化后，每个 seeded_style 包含 action_weights，可作为风格先验用于生成。
-    """
-    if not UPLOAD_ENABLED:
-        raise HTTPException(403, "此操作在生产环境中已禁用")
-    from modules.action_basis import save_user_actions, has_user_actions
-
-    style_result = promote_to_seeded()
-    if has_user_actions():
-        save_user_actions()
-
-    # 分解所有 seeded_styles 为动作权重（供生成时使用）
-    decompose_report = decompose_seeded_styles()
-
-    return JSONResponse({
-        **style_result,
-        "user_actions_saved": has_user_actions(),
-        "styles_decomposed": len(decompose_report),
-        "library": list_styles(),
-        "actions": get_action_info(),
-    })
-
-
-@app.post("/styles/rename")
-async def rename_styles():
-    """用最新命名规则对 seeded_styles 重新命名（无需重新上传 XMP）"""
-    if not UPLOAD_ENABLED:
-        raise HTTPException(403, "此操作在生产环境中已禁用")
-    result = rename_seeded_styles()
-    return JSONResponse({"renamed": len(result), "mapping": result, "library": list_styles()})
-
-
-@app.delete("/styles/user")
-async def delete_user_styles():
-    """清空当前 session 上传的聚类（不影响已固化的 seeded_styles）"""
-    if not UPLOAD_ENABLED:
-        raise HTTPException(403, "此操作在生产环境中已禁用")
-    reset_user_styles()
-    return JSONResponse({"success": True, "library": list_styles()})
-
-
-@app.get("/styles")
-async def get_styles():
-    """获取当前风格模板库列表及校准状态"""
-    return JSONResponse({
-        "styles":      list_styles(),
-        "calibration": calib_summary(),
-    })
-
-
-@app.get("/actions")
-async def get_actions():
-    """获取当前动作基底列表（内置 + 已学习）"""
-    return JSONResponse({"actions": get_action_info()})
-
-
-@app.delete("/actions/learned")
-async def clear_learned_actions():
-    """清除所有学习到的动作，恢复仅使用内置动作基底"""
-    reset_learned()
-    return JSONResponse({"success": True, "actions": get_action_info()})
-
-
-@app.delete("/calibration")
-async def clear_calibration():
-    """清除校准数据，恢复使用内置默认范围"""
-    reset_calibration()
-    return JSONResponse({"success": True, "calibration": calib_summary()})
-
-
-# ── 数据导出 / 导入（用于 Railway ↔ 本地同步）──────────────────────────────
-
-@app.get("/data/export")
-async def export_data():
-    """
-    导出所有学习数据为单个 JSON（校准参数 + 动作基 + 风格库）。
-    可下载后导入到其他环境（本地 ↔ Railway 双向同步）。
-    """
-    from modules.action_basis    import _learned_actions
-    from modules.calibration     import _calib
-    from modules.preset_library  import _user_styles
-
-    payload = {
-        "version":         "1.0",
-        "exported_at":     datetime.now(timezone.utc).isoformat(),
-        "calibration":     _calib,
-        "learned_actions": _learned_actions,
-        "user_styles":     _user_styles,
-    }
-    return Response(
-        content=__import__('json').dumps(payload, ensure_ascii=False, indent=2).encode('utf-8'),
-        media_type="application/json",
-        headers={"Content-Disposition": 'attachment; filename="lr_preset_data.json"'},
-    )
-
-
-@app.post("/data/import")
-async def import_data(payload: dict = Body(...)):
-    """导入学习数据（仅本地/管理员环境开放）"""
-    if not UPLOAD_ENABLED:
-        raise HTTPException(403, "数据导入在此部署环境中已禁用")
-    from modules import calibration as _cal, action_basis as _ab, preset_library as _pl
-
-    errors = []
-
-    if "calibration" in payload:
-        try:
-            _cal._calib = payload["calibration"]
-            _cal.save_calibration()
-        except Exception as e:
-            errors.append(f"calibration: {e}")
-
-    if "learned_actions" in payload:
-        try:
-            _ab._learned_actions = payload["learned_actions"]
-            _ab._invalidate_cache()
-            _ab.save_learned()
-        except Exception as e:
-            errors.append(f"learned_actions: {e}")
-
-    if "user_styles" in payload:
-        try:
-            _pl._user_styles = payload["user_styles"]
-            _pl.save_user_styles()
-        except Exception as e:
-            errors.append(f"user_styles: {e}")
-
-    return JSONResponse({
-        "success":   len(errors) == 0,
-        "errors":    errors,
-        "summary": {
-            "calibration_params": len(_cal._calib),
-            "learned_actions":    len(_ab._learned_actions),
-            "user_styles":        len(_pl._user_styles),
-        },
-    })
 
 
 if __name__ == "__main__":

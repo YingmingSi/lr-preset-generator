@@ -1,26 +1,39 @@
 """
-CNN 训练数据集管道
+训练数据集 v3
 
-从 generate_dataset.py 生成的数据加载：
-  - 原图: {idx:06d}_src.jpg
-  - 参考图（应用参数渲染后）: {idx:06d}_ref.jpg
-  - 参数标签: {idx:06d}_params.json
+关键改进:
+  1. 按"原照片"划分 train/val/test（无数据泄漏）
+  2. 不做几何/色彩增强（避免污染信号）
+  3. 仅做 resize + 归一化
 """
 
 import os
 import json
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict
 
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 from PIL import Image
+
+from param_normalizer import ParamNormalizer
+
+
+PARAM_NAMES = [
+    'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
+    'Saturation', 'Vibrance', 'Clarity',
+    'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
+    'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
+    'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
+    'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
+    'SplitToningShadowHue', 'SplitToningShadowSaturation',
+    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
+]
 
 
 class PresetDataset(Dataset):
-    """LR 参数预测数据集"""
+    """LR 参数预测数据集（按照片划分，无增强）"""
 
     def __init__(
         self,
@@ -29,141 +42,88 @@ class PresetDataset(Dataset):
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
         img_size: int = 384,
-        augment: bool = False,
         seed: int = 42,
     ):
-        """
-        Args:
-            data_dir: 数据目录（包含 XXXXXX_src.jpg, XXXXXX_ref.jpg, XXXXXX_params.json）
-            split: 'train', 'val', 或 'test'
-            train_ratio: 训练集比例
-            val_ratio: 验证集比例
-            img_size: 输入图像大小（正方形）
-            augment: 是否应用数据增强
-            seed: 随机种子（确保不同进程分割一致）
-        """
         self.data_dir = Path(data_dir)
         self.img_size = img_size
-        self.augment = augment
         self.split = split
+        self.normalizer = ParamNormalizer()
 
-        # 收集所有 params.json 文件（作为数据索引）
+        # 加载所有元数据
         param_files = sorted(self.data_dir.glob('*_params.json'))
         if not param_files:
-            raise ValueError(f"在 {data_dir} 中未找到 *_params.json 文件")
+            raise ValueError(f"在 {data_dir} 中未找到 *_params.json")
 
-        # 按 split 划分（确定性划分）
-        np.random.seed(seed)
-        indices = np.random.permutation(len(param_files))
+        # 按 source_photo 分组
+        photos_to_samples = {}
+        for pf in param_files:
+            with open(pf) as f:
+                data = json.load(f)
+            photo = data.get('source_photo', 'unknown')
+            if photo not in photos_to_samples:
+                photos_to_samples[photo] = []
+            photos_to_samples[photo].append(pf)
 
-        n_train = int(len(indices) * train_ratio)
-        n_val = int(len(indices) * val_ratio)
+        # 按照片划分（确保不泄漏）
+        all_photos = sorted(photos_to_samples.keys())
+        rng = np.random.RandomState(seed)
+        rng.shuffle(all_photos)
+
+        n_photos = len(all_photos)
+        n_train_photos = int(n_photos * train_ratio)
+        n_val_photos = int(n_photos * val_ratio)
 
         if split == 'train':
-            split_indices = indices[:n_train]
+            selected_photos = all_photos[:n_train_photos]
         elif split == 'val':
-            split_indices = indices[n_train:n_train + n_val]
+            selected_photos = all_photos[n_train_photos:n_train_photos + n_val_photos]
         elif split == 'test':
-            split_indices = indices[n_train + n_val:]
+            selected_photos = all_photos[n_train_photos + n_val_photos:]
         else:
             raise ValueError(f"Unknown split: {split}")
 
-        self.param_files = [param_files[i] for i in split_indices]
+        # 收集这些照片的所有样本
+        self.param_files = []
+        for photo in selected_photos:
+            self.param_files.extend(photos_to_samples[photo])
 
-        # 图像预处理（无数据增强）
-        self.transform = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=Image.BILINEAR),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],  # ImageNet 均值
-                std=[0.229, 0.224, 0.225],   # ImageNet 标准差
-            ),
-        ])
-
-        # 数据增强（仅训练集）
-        self.aug_transform = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=Image.BILINEAR),
-            transforms.RandomAffine(
-                degrees=5,
-                translate=(0.05, 0.05),
-                scale=(0.95, 1.05),
-            ),
-            transforms.ColorJitter(
-                brightness=0.1,
-                contrast=0.1,
-                saturation=0.1,
-                hue=0.05,
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
-            ),
-        ])
+        self.n_photos = len(selected_photos)
+        self.n_samples = len(self.param_files)
 
     def __len__(self) -> int:
-        return len(self.param_files)
+        return self.n_samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        返回一个样本
-
-        Returns:
-            {
-                'src': tensor (3, 384, 384) - 原图
-                'ref': tensor (3, 384, 384) - 参考图
-                'params': tensor (22,) - 参数标签
-                'idx': int - 样本索引（用于调试）
-            }
-        """
         param_file = self.param_files[idx]
-        base_name = param_file.stem.replace('_params', '')
-
-        # 加载参数
-        with open(param_file, 'r') as f:
+        with open(param_file) as f:
             data = json.load(f)
 
-        # 参数向量（22 个参数，顺序固定）
-        param_names = [
-            'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
-            'Saturation', 'Vibrance', 'Clarity',
-            'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
-            'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
-            'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
-            'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
-            'SplitToningShadowHue', 'SplitToningShadowSaturation',
-            'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
-        ]
+        # 加载图像（直接 PIL → tensor，无几何/色彩增强）
+        src_img = Image.open(data['src']).convert('RGB')
+        ref_img = Image.open(data['ref']).convert('RGB')
 
+        # Resize
+        if src_img.size != (self.img_size, self.img_size):
+            src_img = src_img.resize((self.img_size, self.img_size), Image.BILINEAR)
+            ref_img = ref_img.resize((self.img_size, self.img_size), Image.BILINEAR)
+
+        # → tensor，归一化到 [0, 1]
+        src_tensor = torch.from_numpy(np.array(src_img)).permute(2, 0, 1).float() / 255.0
+        ref_tensor = torch.from_numpy(np.array(ref_img)).permute(2, 0, 1).float() / 255.0
+
+        # 参数归一化到 [-1, 1]
         params = data['params']
+        normalized = self.normalizer.normalize(params)
         param_vector = torch.tensor(
-            [params.get(name, 0) for name in param_names],
-            dtype=torch.float32
+            [normalized.get(name, 0) for name in PARAM_NAMES],
+            dtype=torch.float32,
         )
-
-        # 加载图像
-        src_path = self.data_dir / f'{base_name}_src.jpg'
-        ref_path = self.data_dir / f'{base_name}_ref.jpg'
-
-        try:
-            src_img = Image.open(src_path).convert('RGB')
-            ref_img = Image.open(ref_path).convert('RGB')
-        except Exception as e:
-            raise RuntimeError(f"加载图像失败 {base_name}: {e}")
-
-        # 应用变换
-        if self.augment and self.split == 'train':
-            src_tensor = self.aug_transform(src_img)
-            ref_tensor = self.aug_transform(ref_img)
-        else:
-            src_tensor = self.transform(src_img)
-            ref_tensor = self.transform(ref_img)
 
         return {
             'src': src_tensor,
             'ref': ref_tensor,
             'params': param_vector,
-            'idx': int(base_name),
+            'idx': data.get('idx', idx),
         }
 
 
@@ -175,58 +135,30 @@ def create_dataloaders(
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """
-    创建训练/验证/测试 DataLoader
+    """创建训练/验证/测试 DataLoader（按照片划分）"""
+    train_ds = PresetDataset(data_dir, 'train', train_ratio, val_ratio, img_size)
+    val_ds = PresetDataset(data_dir, 'val', train_ratio, val_ratio, img_size)
+    test_ds = PresetDataset(data_dir, 'test', train_ratio, val_ratio, img_size)
 
-    Args:
-        data_dir: 数据目录
-        batch_size: 批大小
-        num_workers: 数据加载工作进程数
-        img_size: 输入图像大小
-        train_ratio: 训练集比例
-        val_ratio: 验证集比例
+    print(f"📊 数据集划分（按照片）:")
+    print(f"  Train: {train_ds.n_photos} 照片 → {train_ds.n_samples} 样本")
+    print(f"  Val:   {val_ds.n_photos} 照片 → {val_ds.n_samples} 样本")
+    print(f"  Test:  {test_ds.n_photos} 照片 → {test_ds.n_samples} 样本")
 
-    Returns:
-        (train_loader, val_loader, test_loader)
-    """
-    train_dataset = PresetDataset(
-        data_dir, split='train', img_size=img_size,
-        augment=True, train_ratio=train_ratio, val_ratio=val_ratio
-    )
-    val_dataset = PresetDataset(
-        data_dir, split='val', img_size=img_size,
-        augment=False, train_ratio=train_ratio, val_ratio=val_ratio
-    )
-    test_dataset = PresetDataset(
-        data_dir, split='test', img_size=img_size,
-        augment=False, train_ratio=train_ratio, val_ratio=val_ratio
-    )
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True
-    )
+    common = dict(num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **common)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **common)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, **common)
 
     return train_loader, val_loader, test_loader
 
 
 if __name__ == '__main__':
-    # 测试数据加载
-    loader = DataLoader(
-        PresetDataset('./data', split='train', augment=True),
-        batch_size=4
-    )
-
-    batch = next(iter(loader))
-    print(f"src shape: {batch['src'].shape}")  # (4, 3, 384, 384)
-    print(f"ref shape: {batch['ref'].shape}")  # (4, 3, 384, 384)
-    print(f"params shape: {batch['params'].shape}")  # (4, 22)
-    print(f"params range: [{batch['params'].min():.2f}, {batch['params'].max():.2f}]")
+    train_loader, val_loader, test_loader = create_dataloaders('./data', batch_size=4)
+    batch = next(iter(train_loader))
+    print(f"\nbatch shapes:")
+    print(f"  src:    {batch['src'].shape}")
+    print(f"  ref:    {batch['ref'].shape}")
+    print(f"  params: {batch['params'].shape}")
+    print(f"  src 范围: [{batch['src'].min():.3f}, {batch['src'].max():.3f}]")
+    print(f"  params 范围: [{batch['params'].min():.3f}, {batch['params'].max():.3f}]")

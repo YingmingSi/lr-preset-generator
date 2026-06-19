@@ -140,7 +140,9 @@ def _extract_flat_params(params: dict) -> dict:
 
 def params_summary(luminance_params: dict, color_params: dict, scene_result: dict) -> dict:
     """返回人类可读的参数摘要，用于前端展示"""
-    p = scene_result.get('params', {})
+    # HSL 参数现在直接从 color_params 取（CNN 注入位置）
+    # scene_result 保留兼容性但通常为空
+    p = {**color_params, **scene_result.get('params', {})}
 
     return {
         '基础调整': {

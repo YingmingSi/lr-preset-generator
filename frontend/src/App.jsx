@@ -1,8 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 
-const API_BASE      = import.meta.env.VITE_API_URL || "http://localhost:8000";
-// 生产环境（Vercel）设 VITE_DISABLE_UPLOAD=true 隐藏上传入口；本地默认显示
-const ALLOW_UPLOAD  = import.meta.env.VITE_DISABLE_UPLOAD !== "true";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 const COLORS = {
   bg:          "#0a0a0a",
@@ -19,116 +17,19 @@ const COLORS = {
   error:       "#9e4a4a",
 };
 
-const SCENE_OPTIONS = [
-  { value: "auto",         label: "自动识别" },
-  { value: "portrait",     label: "人像" },
-  { value: "landscape",    label: "风光" },
-  { value: "architecture", label: "建筑 / 城市" },
-  { value: "still_life",   label: "静物" },
-  { value: "night",        label: "夜景" },
-  { value: "other",        label: "其他" },
-];
-
-const CAMERA_OPTIONS = [
-  { value: "",          label: "不指定" },
-  { value: "canon",     label: "Canon" },
-  { value: "nikon",     label: "Nikon" },
-  { value: "sony",      label: "Sony" },
-  { value: "fuji",      label: "Fujifilm" },
-  { value: "panasonic", label: "Panasonic" },
-  { value: "olympus",   label: "Olympus" },
-  { value: "leica",     label: "Leica" },
-];
-
 export default function App() {
   const [refFile,     setRefFile]     = useState(null);
   const [srcFile,     setSrcFile]     = useState(null);
   const [refPreview,  setRefPreview]  = useState(null);
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI生成预设");
-  const [refSceneType, setRefSceneType] = useState("auto");
-  const [srcSceneType, setSrcSceneType] = useState("auto");
-  const [cameraBrand, setCameraBrand] = useState("");
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
   const [activeTab,   setActiveTab]   = useState("report");
 
-  // 风格模板库 + 校准
-  const [libraryOpen,        setLibraryOpen]        = useState(false);
-  const [libraryStyles,      setLibraryStyles]      = useState(null);
-  const [calibration,        setCalibration]        = useState(null);
-  const [uploadingPresets,   setUploadingPresets]   = useState(false);
-  const [uploadResult,       setUploadResult]       = useState(null);
-  const xmpInputRef = useRef();
-
   const refInputRef = useRef();
   const srcInputRef = useRef();
-
-  const loadLibrary = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/styles`);
-      const data = await res.json();
-      setLibraryStyles(data.styles || []);
-      if (data.calibration) setCalibration(data.calibration);
-    } catch {}
-  };
-
-  const uploadPresets = async (files) => {
-    if (!files?.length) return;
-    setUploadingPresets(true);
-    setUploadResult(null);
-    setLibraryOpen(true);          // 自动展开面板，确保反馈可见
-    if (!libraryStyles) loadLibrary();  // 首次展开时拉取库列表
-    const form = new FormData();
-    for (const f of files) form.append("preset_files", f);
-    try {
-      const res  = await fetch(`${API_BASE}/upload_presets`, { method: "POST", body: form });
-      const data = await res.json();
-      setUploadResult(data);
-      setLibraryStyles(data.library || []);
-      if (data.calibration) setCalibration(data.calibration);
-    } catch (e) {
-      setUploadResult({ error: e.message });
-    } finally {
-      setUploadingPresets(false);
-    }
-  };
-
-  const clearCalibration = async () => {
-    try {
-      await fetch(`${API_BASE}/calibration`, { method: "DELETE" });
-      setCalibration({ calibrated: false, xmp_count: 0, param_count: 0, key_ranges: {} });
-    } catch {}
-  };
-
-  const resetUserStyles = async () => {
-    try {
-      const res  = await fetch(`${API_BASE}/styles/user`, { method: "DELETE" });
-      const data = await res.json();
-      setLibraryStyles(data.library || []);
-      setUploadResult(null);
-    } catch {}
-  };
-
-  const seedStyles = async () => {
-    try {
-      const res  = await fetch(`${API_BASE}/styles/seed`, { method: "POST" });
-      const data = await res.json();
-      setLibraryStyles(data.library || []);
-      setUploadResult({ _seeded: true, message: data.message, promoted: data.promoted });
-    } catch {}
-  };
-
-  const renameStyles = async () => {
-    try {
-      const res  = await fetch(`${API_BASE}/styles/rename`, { method: "POST" });
-      const data = await res.json();
-      setLibraryStyles(data.library || []);
-      setUploadResult({ _renamed: true, renamed: data.renamed });
-    } catch {}
-  };
-
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -155,9 +56,6 @@ export default function App() {
     form.append("ref_image",    refFile);
     if (srcFile) form.append("src_image", srcFile);
     form.append("preset_name",  presetName);
-    form.append("ref_scene_type", refSceneType);
-    form.append("src_scene_type", srcSceneType);
-    form.append("camera_brand", cameraBrand);
 
     try {
       const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: form });
@@ -192,16 +90,16 @@ export default function App() {
       {/* Header */}
       <header style={{ borderBottom: `1px solid ${COLORS.border}`, padding: "28px 48px", display: "flex", alignItems: "baseline", gap: "16px" }}>
         <h1 style={{ margin: 0, fontSize: "22px", fontWeight: "400", letterSpacing: "0.12em", color: COLORS.accent, fontFamily: "'Georgia',serif" }}>
-          PRESET FORGE
+          LR · 预设生成器
         </h1>
         <span style={{ color: COLORS.textMuted, fontSize: "12px", letterSpacing: "0.08em", fontFamily: "monospace" }}>
-          Lightroom XMP Generator
+          CNN 驱动 · 22 维参数预测 · R² 0.73
         </span>
       </header>
 
       <main style={{ maxWidth: "1100px", margin: "0 auto", padding: "48px" }}>
 
-        {/* Upload */}
+        {/* Image Upload */}
         <section style={{ marginBottom: "28px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }}>
             <DropZone label="参考图" sublabel="必须 · 风格来源"
@@ -222,34 +120,9 @@ export default function App() {
               style={{ display: "none" }}
               onChange={e => handleFile(e.target.files[0], "src")} />
           </div>
-          {ALLOW_UPLOAD && (
-            <input ref={xmpInputRef} type="file" accept=".xmp" multiple
-              style={{ display: "none" }}
-              onChange={e => uploadPresets(Array.from(e.target.files))} />
-          )}
 
           {/* Options row */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
-
-            {/* Ref scene type */}
-            <div>
-              <FieldLabel>参考图场景</FieldLabel>
-              <Select value={refSceneType} onChange={e => setRefSceneType(e.target.value)} options={SCENE_OPTIONS} />
-            </div>
-
-            {/* Src scene type */}
-            <div>
-              <FieldLabel>原图场景</FieldLabel>
-              <Select value={srcSceneType} onChange={e => setSrcSceneType(e.target.value)} options={SCENE_OPTIONS} />
-            </div>
-
-            {/* Camera brand */}
-            <div>
-              <FieldLabel>相机品牌</FieldLabel>
-              <Select value={cameraBrand} onChange={e => setCameraBrand(e.target.value)} options={CAMERA_OPTIONS} />
-            </div>
-
-            {/* Preset name */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
             <div>
               <FieldLabel>预设名称</FieldLabel>
               <input
@@ -264,7 +137,6 @@ export default function App() {
               />
             </div>
 
-            {/* Analyze button */}
             <div style={{ paddingTop: "18px" }}>
               <button
                 onClick={analyze}
@@ -287,180 +159,7 @@ export default function App() {
           {/* Mode indicator */}
           {(refFile || srcFile) && (
             <div style={{ fontSize: "11px", color: COLORS.textMuted, fontFamily: "monospace", letterSpacing: "0.06em" }}>
-              {srcFile ? "● 双图模式 — 差值分析，精度更高" : "● 单图模式 — 风格特征提取"}
-              {cameraBrand && <span style={{ marginLeft: "16px", color: COLORS.accentDim }}>
-                ● 相机补偿：{CAMERA_OPTIONS.find(o => o.value === cameraBrand)?.label}
-              </span>}
-              {refSceneType !== "auto" && <span style={{ marginLeft: "16px", color: COLORS.accentDim }}>● 参考图：{SCENE_OPTIONS.find(o => o.value === refSceneType)?.label}</span>}
-              {srcSceneType !== "auto" && <span style={{ marginLeft: "16px", color: COLORS.accentDim }}>● 原图：{SCENE_OPTIONS.find(o => o.value === srcSceneType)?.label}</span>}
-            </div>
-          )}
-        </section>
-
-        {/* Style Library */}
-        <section style={{ marginBottom: "24px", border: `1px solid ${COLORS.border}`, background: COLORS.surface }}>
-          <div
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", cursor: "pointer", userSelect: "none" }}
-            onClick={() => { const next = !libraryOpen; setLibraryOpen(next); if (next && !libraryStyles) loadLibrary(); }}
-          >
-            <div style={{ fontSize: "11px", letterSpacing: "0.14em", color: COLORS.textDim, fontFamily: "monospace" }}>
-              风格模板库
-              {uploadingPresets
-                ? <span style={{ marginLeft: "10px", color: COLORS.accent }}>· 导入中…</span>
-                : libraryStyles && <span style={{ marginLeft: "10px", color: COLORS.textMuted }}>· {libraryStyles.length} 个模板</span>
-              }
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              {ALLOW_UPLOAD && (
-                <>
-                  <button
-                    onClick={e => { e.stopPropagation(); xmpInputRef.current?.click(); }}
-                    disabled={uploadingPresets}
-                    style={{
-                      background: "none", border: `1px solid ${COLORS.accentDim}`,
-                      color: uploadingPresets ? COLORS.textMuted : COLORS.accentDim,
-                      padding: "4px 14px", fontSize: "10px", letterSpacing: "0.1em",
-                      fontFamily: "monospace", cursor: uploadingPresets ? "not-allowed" : "pointer",
-                    }}
-                  >
-                    {uploadingPresets ? "导入中..." : "+ 导入 XMP 预设"}
-                  </button>
-                  <button
-                    onClick={e => { e.stopPropagation(); renameStyles(); }}
-                    title="用最新规则重新命名固化风格（无需重新上传）"
-                    style={{
-                      background: "none", border: `1px solid ${COLORS.accent}`,
-                      color: COLORS.accent, padding: "4px 10px",
-                      fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
-                    }}
-                  >重命名</button>
-                  <button
-                    onClick={e => { e.stopPropagation(); seedStyles(); }}
-                    title="将当前聚类固化为基础库（git commit 后永久生效）"
-                    style={{
-                      background: "none", border: `1px solid ${COLORS.success}`,
-                      color: COLORS.success, padding: "4px 10px",
-                      fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
-                    }}
-                  >固化</button>
-                  <button
-                    onClick={e => { e.stopPropagation(); if (window.confirm("清空所有用户风格（固化库 + 当前会话）？此操作不可撤销。")) resetUserStyles(); }}
-                    title="仅清空本次会话上传的聚类"
-                    style={{
-                      background: "none", border: `1px solid ${COLORS.error}`,
-                      color: COLORS.error, padding: "4px 10px",
-                      fontSize: "10px", fontFamily: "monospace", cursor: "pointer",
-                    }}
-                  >重置</button>
-                </>
-              )}
-              <span style={{ color: COLORS.textMuted, fontSize: "11px", fontFamily: "monospace" }}>
-                {libraryOpen ? "▲" : "▼"}
-              </span>
-            </div>
-          </div>
-
-          {libraryOpen && (
-            <div style={{ borderTop: `1px solid ${COLORS.border}`, padding: "16px 20px" }}>
-              {uploadResult && (
-                <div style={{
-                  marginBottom: "14px", padding: "10px 14px",
-                  background: uploadResult.error ? "#1a0a0a" : "#0a1a0e",
-                  border: `1px solid ${uploadResult.error ? COLORS.error : COLORS.success}`,
-                  fontSize: "11px", fontFamily: "monospace",
-                }}>
-                  {uploadResult.error ? (
-                    <span style={{ color: "#e08080" }}>✗ {uploadResult.error}</span>
-                  ) : uploadResult._renamed ? (
-                    <span style={{ color: COLORS.accent }}>✓ 已重命名 {uploadResult.renamed} 个风格</span>
-                  ) : uploadResult._seeded ? (
-                    <div>
-                      <span style={{ color: COLORS.success }}>✓ 已固化 {uploadResult.promoted} 个聚类到基础库</span>
-                      <div style={{ marginTop: "6px", color: COLORS.textMuted, fontSize: "10px" }}>
-                        {uploadResult.message}
-                        <br/>运行 <code style={{ color: COLORS.accent }}>git add backend/data/seeded_styles.json &amp;&amp; git commit</code> 后永久生效
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <span style={{ color: COLORS.success }}>✓ 已处理 {uploadResult.imported} 个文件</span>
-                      {uploadResult.cluster_mode && (
-                        <span style={{ color: COLORS.accent, marginLeft: "10px", fontSize: "10px" }}>
-                          · {uploadResult.cluster_mode}
-                        </span>
-                      )}
-                      {uploadResult.presets?.map((p, i) => (
-                        <div key={i} style={{ marginTop: "5px", color: COLORS.textMuted }}>
-                          {(p.action === 'kmeans' || p.action === 'kmeans_merged') ? (
-                            /* K-means 聚类摘要行 */
-                            <>
-                              <span style={{ color: COLORS.accent }}>● 「{p.name}」</span>
-                              <span style={{ marginLeft: "8px" }}>×{p.count} 个文件</span>
-                              {p.action === 'kmeans_merged' && <span style={{ color: COLORS.textMuted, marginLeft: "6px", fontSize: "10px" }}>(已合并)</span>}
-                              {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
-                            </>
-                          ) : (
-                            /* 顺序合并行 */
-                            <>
-                              <span style={{ color: COLORS.textDim }}>· {p.filename}</span>
-                              {p.action === 'added'       && <span style={{ color: COLORS.success,   marginLeft: "8px" }}>→ 新建「{p.name}」</span>}
-                              {p.action === 'merged'      && <span style={{ color: COLORS.accent,    marginLeft: "8px" }}>→ 合并至「{p.name}」（{Math.round((p.similarity||0)*100)}%）</span>}
-                              {p.action === 'merged_full' && <span style={{ color: COLORS.accentDim, marginLeft: "8px" }}>→ 库满，并入「{p.name}」</span>}
-                              {p.error                   && <span style={{ color: "#e08080",         marginLeft: "8px" }}>✗ {p.error}</span>}
-                              {p.tags?.length > 0 && <span style={{ color: COLORS.textMuted, marginLeft: "8px", fontSize: "10px" }}>[{p.tags.join(' · ')}]</span>}
-                            </>
-                          )}
-                        </div>
-                      ))}
-                      {uploadResult.learned_new?.length > 0 && (
-                        <div style={{ marginTop: "8px", color: COLORS.success, fontSize: "10px" }}>
-                          ✦ 学习到新动作：{uploadResult.learned_new.join('、')}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* 校准状态 */}
-              <CalibrationPanel calib={calibration} onClear={clearCalibration} />
-
-              {libraryStyles ? (
-                libraryStyles.length > 0 ? (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px" }}>
-                    {libraryStyles.map(s => (
-                      <div key={s.key} style={{ padding: "10px 14px", background: COLORS.bg, border: `1px solid ${COLORS.border}` }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "4px" }}>
-                          <span style={{ fontSize: "11px", color: COLORS.text, fontFamily: "monospace" }}>{s.name}</span>
-                          <span style={{ fontSize: "9px", fontFamily: "monospace", letterSpacing: "0.06em", color:
-                            s.source === "builtin" ? COLORS.accentDim :
-                            s.source === "seeded"  ? COLORS.success : COLORS.accent }}>
-                            {s.source === "builtin" ? "内置" :
-                             s.source === "seeded"  ? `固化 ×${s.count ?? 1}` :
-                                                      `会话 ×${s.count ?? 1}`}
-                          </span>
-                        </div>
-                        {s.tags?.length > 0 && (
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "4px" }}>
-                            {s.tags.map(tag => (
-                              <span key={tag} style={{
-                                fontSize: "9px", padding: "1px 6px",
-                                background: "#1e1e1e", border: `1px solid ${COLORS.border}`,
-                                color: COLORS.textDim, fontFamily: "monospace",
-                              }}>{tag}</span>
-                            ))}
-                          </div>
-                        )}
-                        <div style={{ fontSize: "10px", color: COLORS.textMuted, fontFamily: "monospace", lineHeight: "1.4" }}>{s.desc}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: "12px", color: COLORS.textMuted, fontFamily: "monospace" }}>暂无预设</div>
-                )
-              ) : (
-                <div style={{ fontSize: "12px", color: COLORS.textMuted, fontFamily: "monospace" }}>加载中...</div>
-              )}
+              {srcFile ? "● 双图模式 — CNN 参数预测（R² 0.73）" : "● 单图模式 — 风格特征提取"}
             </div>
           )}
         </section>
@@ -559,19 +258,6 @@ function DropZone({ label, sublabel, preview, onDrop, onClick, accent }) {
   );
 }
 
-function Select({ value, onChange, options }) {
-  return (
-    <select value={value} onChange={onChange} style={{
-      width: "100%", background: COLORS.surface,
-      border: `1px solid ${COLORS.border}`, color: COLORS.text,
-      padding: "8px 12px", fontSize: "12px", fontFamily: "monospace",
-      outline: "none", cursor: "pointer",
-    }}>
-      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-    </select>
-  );
-}
-
 function FieldLabel({ children }) {
   return (
     <div style={{ fontSize: "9px", letterSpacing: "0.16em", color: COLORS.textMuted, fontFamily: "monospace", marginBottom: "5px" }}>
@@ -581,89 +267,14 @@ function FieldLabel({ children }) {
 }
 
 function ReportTab({ result }) {
-  const report     = result.report || {};
-  const confidence = report.confidence || {};
-
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
-        <Label>风格识别</Label>
-        <div style={{ fontSize: "18px", color: COLORS.accent, fontFamily: "'Georgia',serif", margin: "8px 0 12px" }}>
-          {report.style_summary || "—"}
-        </div>
-        {report.style_keywords?.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
-            {report.style_keywords.map(kw => (
-              <span key={kw} style={{
-                background: "#1a1a1a", border: `1px solid ${COLORS.border}`,
-                padding: "3px 10px", fontSize: "10px", fontFamily: "monospace",
-                color: COLORS.textDim, letterSpacing: "0.06em",
-              }}>{kw}</span>
-            ))}
-          </div>
-        )}
-        <Row label="参考图场景" value={report.scene_label || report.scene_type} />
-        {report.src_scene_label && <Row label="原图场景" value={report.src_scene_label} />}
-        <Row label="光线环境"  value={report.lighting || "—"} />
-        <Row label="分析模式"  value={result.mode === "B_dual" ? "双图差值" : "单图特征"} />
-        {result.compression_detected && <Row label="图片质量" value="检测到压缩，已补偿" warn />}
-        {result.is_raw_source          && <Row label="原图格式" value="RAW（高精度）" good />}
-        {result.camera_note            && <Row label="相机补偿" value={result.camera_note} />}
-        {result.curve_style && <Row label="曲线风格" value={result.curve_style} />}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-        {/* 动作分解 */}
-        {result.action_top?.length > 0 && (
-          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "14px" }}>
-              <Label>动作分解</Label>
-              <span style={{ fontSize: "9px", fontFamily: "monospace", color: result.action_r2 > 0.7 ? COLORS.success : result.action_r2 > 0.4 ? COLORS.accent : COLORS.warning }}>
-                R² = {Math.round((result.action_r2 || 0) * 100)}%
-              </span>
-            </div>
-            {result.action_top.map(a => (
-              <div key={a.key} style={{ marginBottom: "9px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px", fontSize: "11px", fontFamily: "monospace" }}>
-                  <span style={{ color: COLORS.text }}>{a.label}</span>
-                  <span style={{ color: COLORS.accent }}>{Math.round(a.ratio * 100)}%</span>
-                </div>
-                <div style={{ height: "2px", background: COLORS.border }}>
-                  <div style={{ height: "100%", width: `${Math.round(a.ratio * 100)}%`, background: COLORS.accent, transition: "width 0.6s ease" }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
-          <Label>参数置信度</Label>
-          <div style={{ marginTop: "12px" }}>
-            {Object.entries(confidence).filter(([k]) => k !== "overall").map(([key, val]) => (
-              <ConfBar key={key} label={{
-                tone_curve:        "色调曲线",
-                hsl:               "HSL调整",
-                color_grading:     "颜色分级",
-                white_balance:     "白平衡",
-                scene_recognition: "场景识别",
-              }[key] || key} value={val} />
-            ))}
-          </div>
-        </div>
-
-        {report.warnings?.length > 0 && (
-          <div style={{ background: "#110e08", border: "1px solid #3a2e18", padding: "20px" }}>
-            <Label>注意事项</Label>
-            <div style={{ marginTop: "10px" }}>
-              {report.warnings.map((w, i) => (
-                <div key={i} style={{ fontSize: "12px", color: "#c8a060", marginBottom: "8px", lineHeight: "1.6", fontFamily: "monospace" }}>
-                  {w}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
+      <Label>分析摘要</Label>
+      <Row label="分析模式"  value={result.mode === "B_dual" ? "双图 CNN 预测" : "单图特征提取"} />
+      {result.cnn_used         && <Row label="CNN 参数"  value="已应用（R² 0.73）" good />}
+      {result.compression_detected && <Row label="图片质量" value="检测到压缩，已补偿" warn />}
+      {result.is_raw_source          && <Row label="原图格式" value="RAW（高精度）" good />}
+      {result.curve_style && <Row label="曲线风格" value={result.curve_style} />}
     </div>
   );
 }
@@ -739,83 +350,6 @@ function Row({ label, value, warn, good }) {
     <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${COLORS.border}`, fontSize: "12px", fontFamily: "monospace" }}>
       <span style={{ color: COLORS.textMuted }}>{label}</span>
       <span style={{ color: warn ? COLORS.warning : good ? COLORS.success : COLORS.textDim }}>{value}</span>
-    </div>
-  );
-}
-
-function ConfBar({ label, value }) {
-  const pct   = Math.round(value * 100);
-  const color = pct >= 75 ? COLORS.success : pct >= 50 ? COLORS.accent : COLORS.warning;
-  return (
-    <div style={{ marginBottom: "10px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px", fontSize: "11px", fontFamily: "monospace" }}>
-        <span style={{ color: COLORS.textMuted }}>{label}</span>
-        <span style={{ color }}>{pct}%</span>
-      </div>
-      <div style={{ height: "2px", background: COLORS.border }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: color, transition: "width 0.6s ease" }} />
-      </div>
-    </div>
-  );
-}
-
-function CalibrationPanel({ calib, onClear }) {
-  const [showRanges, setShowRanges] = useState(false);
-  if (!calib) {
-    return (
-      <div style={{ marginBottom: "14px", padding: "10px 14px", background: COLORS.bg, border: `1px solid ${COLORS.border}`, fontSize: "11px", fontFamily: "monospace", color: COLORS.textMuted }}>
-        参数校准：未校准（使用内置默认范围）· 上传 XMP 预设后自动校准
-      </div>
-    );
-  }
-  return (
-    <div style={{ marginBottom: "14px", background: COLORS.bg, border: `1px solid ${calib.calibrated ? COLORS.success : COLORS.border}` }}>
-      <div
-        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", cursor: "pointer", userSelect: "none" }}
-        onClick={() => setShowRanges(v => !v)}
-      >
-        <div style={{ fontSize: "11px", fontFamily: "monospace" }}>
-          {calib.calibrated ? (
-            <span style={{ color: COLORS.success }}>
-              ✓ 参数校准：已激活 · 基于 {calib.xmp_count} 个 XMP · 覆盖 {calib.param_count} 个参数
-            </span>
-          ) : (
-            <span style={{ color: COLORS.textMuted }}>参数校准：未激活（上传 XMP 预设后自动学习）</span>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          {calib.calibrated && (
-            <button onClick={e => { e.stopPropagation(); onClear(); }} style={{
-              background: "none", border: `1px solid ${COLORS.error}`,
-              color: COLORS.error, padding: "2px 10px",
-              fontSize: "9px", fontFamily: "monospace", cursor: "pointer", letterSpacing: "0.06em",
-            }}>
-              重置
-            </button>
-          )}
-          {calib.calibrated && (
-            <span style={{ color: COLORS.textMuted, fontSize: "10px", fontFamily: "monospace" }}>
-              {showRanges ? "▲" : "▼"}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {showRanges && calib.calibrated && Object.keys(calib.key_ranges || {}).length > 0 && (
-        <div style={{ borderTop: `1px solid ${COLORS.border}`, padding: "10px 14px" }}>
-          <div style={{ fontSize: "9px", color: COLORS.textMuted, fontFamily: "monospace", marginBottom: "8px", letterSpacing: "0.1em" }}>
-            学习到的参数范围（P5 ~ P95）
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "4px 20px" }}>
-            {Object.entries(calib.key_ranges).map(([k, r]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", fontFamily: "monospace", padding: "2px 0", borderBottom: `1px solid ${COLORS.border}` }}>
-                <span style={{ color: COLORS.textMuted }}>{k.replace('SaturationAdjustment', 'Sat·').replace('Adjustment', '')}</span>
-                <span style={{ color: COLORS.accent }}>[{r.lo > 0 ? `+${r.lo}` : r.lo}, {r.hi > 0 ? `+${r.hi}` : r.hi}]</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

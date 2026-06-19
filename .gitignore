@@ -14,8 +14,20 @@ node_modules/
 frontend/dist/
 frontend/.env.local
 
-# Data — 提交学习数据 JSON，忽略原始 XMP 上传文件
-backend/data/presets/*.xmp
+# Backend data (已移除，但保留规则防止意外提交)
+backend/data/
+
+# Training - 大文件（数据集、checkpoint、原图、日志）
+training/data/
+training/checkpoints/
+training/checkpoints_test/
+training/photos/
+training/photos_jpg/
+training/logs/
+training/*.log
+
+# Claude 本地配置
+.claude/
 
 # Misc
 .env

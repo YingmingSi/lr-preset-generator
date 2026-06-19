@@ -21,6 +21,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from cnn_model import ParamPredictor, ParamPredictorWithSkip, count_parameters
 from dataset import create_dataloaders
+from param_normalizer import ParamNormalizer
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -41,9 +42,10 @@ class Trainer:
     ):
         self.model = model.to(device)
         self.device = device
+        self.normalizer = ParamNormalizer()
 
-        # 损失函数：L1 Loss（对异常值鲁棒）
-        self.criterion = nn.L1Loss()
+        # 损失函数：MSE（L1 在目标均值附近梯度恒定，激励模型塌缩到中心）
+        self.criterion = nn.MSELoss()
 
         # 优化器：AdamW
         self.optimizer = optim.AdamW(
@@ -122,13 +124,17 @@ class Trainer:
 
         avg_loss = total_loss / len(val_loader)
 
-        # 计算 MAE、RMSE、R² 等指标
-        mae = np.mean(np.abs(all_preds - all_targets))
-        rmse = np.sqrt(np.mean((all_preds - all_targets) ** 2))
+        # 反归一化到原始参数空间，用于指标计算
+        all_preds_denorm = self.normalizer.denormalize_array(all_preds)
+        all_targets_denorm = self.normalizer.denormalize_array(all_targets)
+
+        # 计算 MAE、RMSE、R² 等指标（在原始参数空间）
+        mae = np.mean(np.abs(all_preds_denorm - all_targets_denorm))
+        rmse = np.sqrt(np.mean((all_preds_denorm - all_targets_denorm) ** 2))
 
         # R² 分数（针对每个参数）
-        ss_res = np.sum((all_targets - all_preds) ** 2, axis=0)
-        ss_tot = np.sum((all_targets - np.mean(all_targets, axis=0)) ** 2, axis=0)
+        ss_res = np.sum((all_targets_denorm - all_preds_denorm) ** 2, axis=0)
+        ss_tot = np.sum((all_targets_denorm - np.mean(all_targets_denorm, axis=0)) ** 2, axis=0)
         r2_scores = 1 - (ss_res / (ss_tot + 1e-10))
         r2_mean = np.mean(r2_scores)
 
@@ -143,8 +149,9 @@ class Trainer:
             'SplitToningShadowHue', 'SplitToningShadowSaturation',
             'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
         ]
+        # 按参数 MAE（使用反归一化值，与全局 MAE 一致）
         param_mae = {
-            name: float(np.mean(np.abs(all_preds[:, i] - all_targets[:, i])))
+            name: float(np.mean(np.abs(all_preds_denorm[:, i] - all_targets_denorm[:, i])))
             for i, name in enumerate(param_names)
         }
 
@@ -190,8 +197,9 @@ def main():
                         help='初始学习率')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='权重衰减')
-    parser.add_argument('--backbone', type=str, default='resnet18',
-                        choices=['resnet18', 'resnet34'],
+    parser.add_argument('--backbone', type=str, default='simple_color',
+                        choices=['simple_color', 'resnet18', 'resnet34',
+                                 'convnext_tiny', 'convnext_small'],
                         help='骨干网络')
     parser.add_argument('--no-pretrain', action='store_true',
                         help='不使用 ImageNet 预训练权重')

@@ -1,57 +1,148 @@
 """
-CNN 参数预测器 — 集成到后端
+CNN 参数预测器（后端集成版）
 
-推理接口：
-  predict_params(src_rgb, ref_rgb) → params_dict
+加载 v4 颜色专用 CNN 模型，从 (src_image, ref_image) 预测 22 维 LR 参数。
 """
 
 import os
 import json
 import torch
+import torch.nn as nn
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from PIL import Image
+from typing import Dict, Optional
 
-# 动态导入模型定义（支持训练和推理环境）
-try:
-    from cnn_model import ParamPredictor
-except ImportError:
-    # 如果在后端目录，从训练目录导入
-    import sys
-    training_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'training')
-    if os.path.exists(training_dir):
-        sys.path.insert(0, training_dir)
-        from cnn_model import ParamPredictor
 
+# ─── 模型架构（与 training/cnn_model.py 一致）────────────────────────────────
+
+PARAM_NAMES = (
+    'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
+    'Saturation', 'Vibrance', 'Clarity',
+    'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
+    'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
+    'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
+    'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
+    'SplitToningShadowHue', 'SplitToningShadowSaturation',
+    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
+)
+
+# 参数范围（与训练时一致）
+PARAM_RANGES = {
+    'Exposure':     (-3.0, 3.0),
+    'Highlights':   (-100, 100),
+    'Shadows':      (-100, 100),
+    'Blacks':       (-100, 100),
+    'Whites':       (-100, 100),
+    'Contrast':     (-100, 100),
+    'Saturation':   (-100, 100),
+    'Vibrance':     (-100, 100),
+    'Clarity':      (-100, 100),
+    'SaturationAdjustmentOrange': (-100, 100),
+    'SaturationAdjustmentAqua':   (-100, 100),
+    'SaturationAdjustmentGreen':  (-100, 100),
+    'SaturationAdjustmentBlue':   (-100, 100),
+    'HueAdjustmentOrange': (-100, 100),
+    'HueAdjustmentGreen':  (-100, 100),
+    'HueAdjustmentAqua':   (-100, 100),
+    'LuminanceAdjustmentOrange': (-100, 100),
+    'LuminanceAdjustmentBlue':   (-100, 100),
+    'SplitToningShadowHue':           (0, 360),
+    'SplitToningShadowSaturation':    (0, 100),
+    'SplitToningHighlightHue':        (0, 360),
+    'SplitToningHighlightSaturation': (0, 100),
+}
+
+
+def rgb_to_hsv(rgb: torch.Tensor) -> torch.Tensor:
+    """向量化 RGB → HSV"""
+    r, g, b = rgb[:, 0:1], rgb[:, 1:2], rgb[:, 2:3]
+    maxc, _ = rgb.max(dim=1, keepdim=True)
+    minc, _ = rgb.min(dim=1, keepdim=True)
+    delta = maxc - minc
+    v = maxc
+    s = torch.where(maxc > 0, delta / (maxc + 1e-10), torch.zeros_like(maxc))
+    rc = (maxc - r) / (delta + 1e-10)
+    gc = (maxc - g) / (delta + 1e-10)
+    bc = (maxc - b) / (delta + 1e-10)
+    h_r = bc - gc
+    h_g = 2.0 + rc - bc
+    h_b = 4.0 + gc - rc
+    h = torch.where(r == maxc, h_r,
+        torch.where(g == maxc, h_g, h_b))
+    h = (h / 6.0) % 1.0
+    h = torch.where(delta == 0, torch.zeros_like(h), h)
+    return torch.cat([h, s, v], dim=1)
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_c, out_c, stride=1, pool=False):
+        super().__init__()
+        self.conv = nn.Conv2d(in_c, out_c, 3, stride=stride, padding=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_c)
+        self.act = nn.GELU()
+        self.pool = nn.MaxPool2d(2) if pool else nn.Identity()
+
+    def forward(self, x):
+        return self.pool(self.act(self.bn(self.conv(x))))
+
+
+class ParamPredictorModel(nn.Module):
+    """色彩映射 CNN（v4 架构）"""
+
+    def __init__(self):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(12, 64, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+        )
+        self.stage1 = ConvBlock(64, 96, pool=True)
+        self.stage2 = ConvBlock(96, 128, pool=True)
+        self.stage3 = ConvBlock(128, 192, pool=True)
+        self.stage4 = ConvBlock(192, 256, pool=True)
+
+        self.head = nn.Sequential(
+            nn.Linear(256 * 3, 512),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 22),
+            nn.Tanh(),
+        )
+
+    def forward(self, src, ref):
+        src_hsv = rgb_to_hsv(src)
+        ref_hsv = rgb_to_hsv(ref)
+        x = torch.cat([src, src_hsv, ref, ref_hsv], dim=1)
+
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.stage4(x)
+
+        avg = x.mean(dim=[2, 3])
+        mx, _ = x.flatten(2).max(dim=2)
+        std = x.flatten(2).std(dim=2)
+        return self.head(torch.cat([avg, mx, std], dim=1))
+
+
+# ─── 推理接口 ─────────────────────────────────────────────────────────────
 
 class CNNParameterPredictor:
-    """CNN 参数预测器"""
-
-    # 参数名称顺序（必须与训练时一致）
-    PARAM_NAMES = [
-        'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
-        'Saturation', 'Vibrance', 'Clarity',
-        'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
-        'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
-        'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
-        'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
-        'SplitToningShadowHue', 'SplitToningShadowSaturation',
-        'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
-    ]
+    """LR 参数预测器（CNN 推理接口）"""
 
     def __init__(
         self,
         model_path: Optional[str] = None,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        img_size: int = 384,
     ):
-        """
-        初始化预测器
-
-        Args:
-            model_path: 模型检查点路径（如为 None，则不加载）
-            device: 'cuda' 或 'cpu'
-        """
         self.device = torch.device(device)
+        self.img_size = img_size
         self.model = None
         self.is_loaded = False
 
@@ -59,220 +150,140 @@ class CNNParameterPredictor:
             self.load_model(model_path)
 
     def load_model(self, model_path: str):
-        """加载模型"""
+        """加载模型权重"""
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"模型文件不存在: {model_path}")
 
-        # 创建模型
-        self.model = ParamPredictor(backbone='resnet18', pretrained=False)
-        self.model = self.model.to(self.device)
+        self.model = ParamPredictorModel().to(self.device)
+        ckpt = torch.load(model_path, map_location=self.device, weights_only=False)
 
-        # 加载权重
-        checkpoint = torch.load(model_path, map_location=self.device)
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+            self.model.load_state_dict(ckpt['model_state_dict'])
         else:
-            self.model.load_state_dict(checkpoint)
+            self.model.load_state_dict(ckpt)
 
         self.model.eval()
         self.is_loaded = True
-        print(f"✓ 模型已加载: {model_path}")
+        print(f"✓ CNN 模型已加载: {model_path}")
 
-    @staticmethod
-    def _normalize_image(img_rgb: np.ndarray) -> torch.Tensor:
-        """
-        将 RGB 图像标准化为 PyTorch 张量
-
-        Args:
-            img_rgb: RGB 图像数组 (H, W, 3)，值范围 [0, 255] 或 [0, 1]
-
-        Returns:
-            标准化后的张量 (3, H, W)
-        """
-        # 转换为 [0, 1] 范围
-        if img_rgb.max() > 1.0:
-            img_rgb = img_rgb.astype(np.float32) / 255.0
+    def _preprocess_image(self, img: np.ndarray) -> torch.Tensor:
+        """RGB numpy [0-255] 或 [0-1] → tensor (1, 3, H, W) [0-1]"""
+        if img.dtype == np.uint8:
+            img = img.astype(np.float32) / 255.0
+        elif img.max() > 1.5:
+            img = img.astype(np.float32) / 255.0
         else:
-            img_rgb = img_rgb.astype(np.float32)
+            img = img.astype(np.float32)
 
-        # 调整维度：(H, W, 3) → (3, H, W)
-        img_rgb = np.transpose(img_rgb, (2, 0, 1))
+        # Resize 到训练尺寸
+        if img.shape[0] != self.img_size or img.shape[1] != self.img_size:
+            pil = Image.fromarray((img * 255).clip(0, 255).astype(np.uint8))
+            pil = pil.resize((self.img_size, self.img_size), Image.BILINEAR)
+            img = np.array(pil).astype(np.float32) / 255.0
 
-        # ImageNet 标准化
-        img_tensor = torch.from_numpy(img_rgb)
-        img_tensor = (img_tensor - torch.tensor(
-            [0.485, 0.456, 0.406], dtype=torch.float32
-        ).view(3, 1, 1)) / torch.tensor(
-            [0.229, 0.224, 0.225], dtype=torch.float32
-        ).view(3, 1, 1)
+        # (H, W, 3) → (3, H, W) → (1, 3, H, W)
+        tensor = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
+        return tensor.to(self.device)
 
-        return img_tensor
+    def _denormalize(self, normalized: np.ndarray) -> dict:
+        """从 [-1, 1] 反归一化到原始参数范围"""
+        out = {}
+        for i, name in enumerate(PARAM_NAMES):
+            lo, hi = PARAM_RANGES[name]
+            mid = (lo + hi) / 2
+            span = (hi - lo) / 2
+            val = float(normalized[i]) * span + mid
 
-    @staticmethod
-    def _resize_image(tensor: torch.Tensor, size: int = 384) -> torch.Tensor:
+            # 整数化（除 Exposure）
+            if name == 'Exposure':
+                out[name] = round(val, 2)
+            else:
+                out[name] = int(round(val))
+        return out
+
+    def predict(self, src_rgb: np.ndarray, ref_rgb: np.ndarray) -> Dict[str, float]:
         """
-        调整图像大小
+        预测 LR 参数
 
         Args:
-            tensor: 输入张量 (3, H, W)
-            size: 目标大小（正方形）
+            src_rgb: 原图 RGB (H, W, 3)
+            ref_rgb: 参考图 RGB (H, W, 3)
 
         Returns:
-            调整后的张量 (3, size, size)
-        """
-        import torch.nn.functional as F
-        if tensor.shape[1] != size or tensor.shape[2] != size:
-            tensor = F.interpolate(
-                tensor.unsqueeze(0),
-                size=(size, size),
-                mode='bilinear',
-                align_corners=False
-            ).squeeze(0)
-        return tensor
-
-    def predict(
-        self,
-        src_rgb: np.ndarray,
-        ref_rgb: np.ndarray,
-    ) -> Dict[str, float]:
-        """
-        预测参数
-
-        Args:
-            src_rgb: 原图 (H, W, 3)，值范围 [0, 255] 或 [0, 1]
-            ref_rgb: 参考图 (H, W, 3)，值范围 [0, 255] 或 [0, 1]
-
-        Returns:
-            参数字典 {param_name: value}
+            {param_name: value} 字典
         """
         if not self.is_loaded:
             raise RuntimeError("模型未加载，请先调用 load_model()")
 
-        # 预处理
-        src_tensor = self._normalize_image(src_rgb)
-        ref_tensor = self._normalize_image(ref_rgb)
+        src_t = self._preprocess_image(src_rgb)
+        ref_t = self._preprocess_image(ref_rgb)
 
-        src_tensor = self._resize_image(src_tensor, 384)
-        ref_tensor = self._resize_image(ref_tensor, 384)
-
-        # 添加 batch 维度
-        src_tensor = src_tensor.unsqueeze(0).to(self.device)
-        ref_tensor = ref_tensor.unsqueeze(0).to(self.device)
-
-        # 推理
         with torch.no_grad():
-            pred_params = self.model(src_tensor, ref_tensor)  # (1, 22)
+            pred = self.model(src_t, ref_t)  # (1, 22), 范围 [-1, 1]
 
-        # 转换为字典
-        pred_np = pred_params.squeeze(0).cpu().numpy()
-        params_dict = {
-            name: float(value)
-            for name, value in zip(self.PARAM_NAMES, pred_np)
-        }
+        normalized = pred.squeeze(0).cpu().numpy()
+        params = self._denormalize(normalized)
 
-        # 约束：SplitToning 饱和度最大 15
-        params_dict['SplitToningShadowSaturation'] = min(params_dict['SplitToningShadowSaturation'], 15.0)
-        params_dict['SplitToningHighlightSaturation'] = min(params_dict['SplitToningHighlightSaturation'], 15.0)
+        # 安全约束（颜色分级饱和度限制 15，避免过饱和）
+        params['SplitToningShadowSaturation'] = min(
+            params['SplitToningShadowSaturation'], 15
+        )
+        params['SplitToningHighlightSaturation'] = min(
+            params['SplitToningHighlightSaturation'], 15
+        )
 
-        return params_dict
-
-    def predict_batch(
-        self,
-        src_batch: np.ndarray,
-        ref_batch: np.ndarray,
-    ) -> list:
-        """
-        批量预测
-
-        Args:
-            src_batch: 原图批 (B, H, W, 3)
-            ref_batch: 参考图批 (B, H, W, 3)
-
-        Returns:
-            参数字典列表 [params_dict, ...]
-        """
-        if not self.is_loaded:
-            raise RuntimeError("模型未加载")
-
-        results = []
-        for src, ref in zip(src_batch, ref_batch):
-            params = self.predict(src, ref)
-            results.append(params)
-        return results
-
-    def predict_with_blend(
-        self,
-        src_rgb: np.ndarray,
-        ref_rgb: np.ndarray,
-        analysis_params: Dict[str, float],
-        blend_weight: float = 0.5,
-    ) -> Dict[str, float]:
-        """
-        融合 CNN 预测和传统分析结果
-
-        Args:
-            src_rgb: 原图
-            ref_rgb: 参考图
-            analysis_params: 传统分析得到的参数
-            blend_weight: 融合权重（0 = 纯分析，1 = 纯 CNN）
-
-        Returns:
-            融合后的参数字典
-        """
-        if not self.is_loaded:
-            return analysis_params
-
-        cnn_params = self.predict(src_rgb, ref_rgb)
-
-        # 按参数融合
-        blended = {}
-        for name in self.PARAM_NAMES:
-            cnn_val = cnn_params.get(name, 0)
-            analysis_val = analysis_params.get(name, 0)
-
-            # 简单线性融合
-            blended[name] = blend_weight * cnn_val + (1 - blend_weight) * analysis_val
-
-        return blended
+        return params
 
 
-# 全局预测器实例（延迟加载）
-_predictor = None
+# ─── 全局单例 ─────────────────────────────────────────────────────────────
+
+_predictor: Optional[CNNParameterPredictor] = None
 
 
-def load_predictor(model_path: str):
-    """加载全局预测器实例"""
+def load_predictor(model_path: Optional[str] = None) -> CNNParameterPredictor:
+    """加载全局 CNN 预测器（应用启动时调用一次）"""
     global _predictor
+
+    if model_path is None:
+        # 默认路径：backend/models/param_predictor.pt
+        backend_dir = Path(__file__).resolve().parent.parent
+        model_path = str(backend_dir / 'models' / 'param_predictor.pt')
+
+    if not os.path.exists(model_path):
+        print(f"⚠ CNN 模型不存在: {model_path}（将退化到传统分析）")
+        return None
+
     _predictor = CNNParameterPredictor(model_path=model_path)
+    return _predictor
 
 
-def predict_params(src_rgb: np.ndarray, ref_rgb: np.ndarray) -> Dict[str, float]:
-    """便捷接口：预测参数"""
+def predict_params(src_rgb: np.ndarray, ref_rgb: np.ndarray) -> Optional[Dict[str, float]]:
+    """便捷接口：预测参数（如未加载返回 None）"""
     if _predictor is None:
-        raise RuntimeError("CNN 预测器未初始化，请先调用 load_predictor()")
+        return None
     return _predictor.predict(src_rgb, ref_rgb)
 
 
 def is_predictor_loaded() -> bool:
-    """检查预测器是否已加载"""
-    global _predictor
     return _predictor is not None and _predictor.is_loaded
 
 
 if __name__ == '__main__':
-    # 测试（需要模型文件）
     import sys
     if len(sys.argv) > 1:
         model_path = sys.argv[1]
-        predictor = CNNParameterPredictor(model_path)
-
-        # 伪数据
-        src = np.random.randint(0, 256, (384, 384, 3), dtype=np.uint8)
-        ref = np.random.randint(0, 256, (384, 384, 3), dtype=np.uint8)
-
-        params = predictor.predict(src, ref)
-        print("预测参数:")
-        for k, v in list(params.items())[:5]:
-            print(f"  {k}: {v:.2f}")
     else:
-        print("用法: python cnn_predictor.py <model_path>")
+        backend_dir = Path(__file__).resolve().parent.parent
+        model_path = str(backend_dir / 'models' / 'param_predictor.pt')
+
+    predictor = CNNParameterPredictor(model_path)
+
+    # 测试：随机图
+    np.random.seed(42)
+    src = np.random.randint(0, 256, (384, 384, 3), dtype=np.uint8)
+    ref = np.random.randint(0, 256, (384, 384, 3), dtype=np.uint8)
+
+    params = predictor.predict(src, ref)
+    print("\n预测参数:")
+    for name, val in params.items():
+        print(f"  {name:<40}: {val}")

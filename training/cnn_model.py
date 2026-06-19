@@ -1,169 +1,170 @@
 """
-CNN 参数预测模型
+颜色映射 CNN v4 — 极简色彩专用
 
-核心思想：
-  输入：(src_image, ref_image) - 原图和参考图
-  学习：参数变化对应的图像变化规律
-  输出：预测的 22 维 LR 参数向量
+设计原则:
+  1. 不用 ImageNet 预训练（对色彩鲁棒反而是缺点）
+  2. 输入 RGB + HSV（直接给模型色彩信息）
+  3. 小型 CNN，从头训练
+  4. 保留空间特征（不 pool 到 1×1）
+  5. 单一回归 head（不要多任务头）
 
-模型架构：Siamese 双分支 + Fusion 层
+输入: src (B, 3, H, W) + ref (B, 3, H, W)
+内部: 计算 HSV，拼接 RGB+HSV (12 通道) → CNN → 22 维参数
 """
 
 import torch
 import torch.nn as nn
-import torchvision.models as models
-from typing import Tuple
+import torch.nn.functional as F
+
+
+PARAM_NAMES = [
+    'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
+    'Saturation', 'Vibrance', 'Clarity',
+    'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
+    'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
+    'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
+    'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
+    'SplitToningShadowHue', 'SplitToningShadowSaturation',
+    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
+]
+
+
+def rgb_to_hsv(rgb: torch.Tensor) -> torch.Tensor:
+    """
+    向量化 RGB → HSV（PyTorch）
+
+    输入: (B, 3, H, W)，值在 [0, 1]
+    输出: (B, 3, H, W)，HSV 通道，值都在 [0, 1]
+    """
+    r, g, b = rgb[:, 0:1], rgb[:, 1:2], rgb[:, 2:3]
+
+    maxc, _ = rgb.max(dim=1, keepdim=True)
+    minc, _ = rgb.min(dim=1, keepdim=True)
+    delta = maxc - minc
+
+    v = maxc
+    s = torch.where(maxc > 0, delta / (maxc + 1e-10), torch.zeros_like(maxc))
+
+    rc = (maxc - r) / (delta + 1e-10)
+    gc = (maxc - g) / (delta + 1e-10)
+    bc = (maxc - b) / (delta + 1e-10)
+
+    h_r = bc - gc
+    h_g = 2.0 + rc - bc
+    h_b = 4.0 + gc - rc
+
+    h = torch.where(r == maxc, h_r,
+        torch.where(g == maxc, h_g, h_b))
+    h = (h / 6.0) % 1.0
+    h = torch.where(delta == 0, torch.zeros_like(h), h)
+
+    return torch.cat([h, s, v], dim=1)
+
+
+class ConvBlock(nn.Module):
+    """卷积块：Conv → BN → GELU → (optional) MaxPool"""
+    def __init__(self, in_c: int, out_c: int, stride: int = 1, pool: bool = False):
+        super().__init__()
+        self.conv = nn.Conv2d(in_c, out_c, kernel_size=3, stride=stride,
+                              padding=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_c)
+        self.act = nn.GELU()
+        self.pool = nn.MaxPool2d(2) if pool else nn.Identity()
+
+    def forward(self, x):
+        return self.pool(self.act(self.bn(self.conv(x))))
 
 
 class ParamPredictor(nn.Module):
-    """参数预测 CNN 模型（Siamese 双分支）"""
+    """
+    色彩映射 CNN
 
-    def __init__(self, backbone: str = 'resnet18', pretrained: bool = True):
-        """
-        Args:
-            backbone: 'resnet18' 或 'resnet34'（轻量模型适合迁移学习）
-            pretrained: 使用 ImageNet 预训练权重
-        """
+    输入: src (B, 3, H, W), ref (B, 3, H, W) 已经归一化到 [0, 1]
+    输出: (B, 22) 参数预测（Tanh 限制到 [-1, 1]）
+
+    架构:
+      1. 把 src 和 ref 都计算 RGB+HSV (6 通道每张)
+      2. 在通道维度堆叠: 12 通道
+      3. 简单 CNN 提取空间特征 (384→12)
+      4. 全局池化 + MLP → 22
+    """
+
+    def __init__(self, backbone: str = 'simple_color', pretrained: bool = False):
         super().__init__()
 
-        # 双分支：都用相同的骨干网络（Siamese 架构）
-        weights = 'DEFAULT' if pretrained else None
-        if backbone == 'resnet18':
-            base_model = models.resnet18(weights=weights)
-        elif backbone == 'resnet34':
-            base_model = models.resnet34(weights=weights)
-        else:
-            raise ValueError(f"未支持的 backbone: {backbone}")
+        # 输入 12 通道：src(RGB+HSV) + ref(RGB+HSV)
+        self.stem = nn.Sequential(
+            nn.Conv2d(12, 64, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+        )  # 384 → 192
 
-        # 移除分类头，保留特征提取层（5 个阶段）
-        # layer4 输出: 512 维特征，空间大小 12×12（输入 384 时）
-        self.backbone = nn.Sequential(*list(base_model.children())[:-1])
-        backbone_out_dim = 512
+        # 主干（5 个 stage）
+        self.stage1 = ConvBlock(64, 96, pool=True)    # 192 → 96
+        self.stage2 = ConvBlock(96, 128, pool=True)   # 96 → 48
+        self.stage3 = ConvBlock(128, 192, pool=True)  # 48 → 24
+        self.stage4 = ConvBlock(192, 256, pool=True)  # 24 → 12
+        # 不再 pool，保留 12×12 空间特征
 
-        # Fusion 层（拼接 src 和 ref 的特征）
-        self.fusion = nn.Sequential(
-            nn.Linear(backbone_out_dim * 2, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
+        # 全局池化 + 全局统计
+        # 全局: avg, max, std → 3 × 256 = 768
+        self.head = nn.Sequential(
+            nn.Linear(256 * 3, 512),
+            nn.GELU(),
             nn.Dropout(0.3),
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-        )
-
-        # 参数预测头（22 个输出）
-        self.param_head = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(64, 22),  # 22 个参数
-        )
-
-        # 冻结骨干网络的前几层（保留 ImageNet 特征），只微调后层
-        for param in self.backbone[:-2].parameters():
-            param.requires_grad = False
-
-    def forward(self, src: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-        """
-        前向传播
-
-        Args:
-            src: 原图 (batch_size, 3, 384, 384)
-            ref: 参考图 (batch_size, 3, 384, 384)
-
-        Returns:
-            params: 预测的参数向量 (batch_size, 22)
-        """
-        # 双分支特征提取
-        src_feat = self.backbone(src)  # (batch, 512, 1, 1)
-        ref_feat = self.backbone(ref)  # (batch, 512, 1, 1)
-
-        # 展平
-        src_feat = src_feat.flatten(1)  # (batch, 512)
-        ref_feat = ref_feat.flatten(1)  # (batch, 512)
-
-        # Fusion
-        combined = torch.cat([src_feat, ref_feat], dim=1)  # (batch, 1024)
-        fused = self.fusion(combined)  # (batch, 128)
-
-        # 参数预测
-        params = self.param_head(fused)  # (batch, 22)
-
-        return params
-
-
-class ParamPredictorWithSkip(nn.Module):
-    """带残差连接的参数预测模型（更强的表达能力）"""
-
-    def __init__(self, backbone: str = 'resnet18', pretrained: bool = True):
-        super().__init__()
-
-        weights = 'DEFAULT' if pretrained else None
-        if backbone == 'resnet18':
-            base_model = models.resnet18(weights=weights)
-        elif backbone == 'resnet34':
-            base_model = models.resnet34(weights=weights)
-        else:
-            raise ValueError(f"未支持的 backbone: {backbone}")
-
-        self.backbone = nn.Sequential(*list(base_model.children())[:-1])
-        backbone_out_dim = 512
-
-        # 多层 Fusion + 残差
-        self.fusion_block1 = nn.Sequential(
-            nn.Linear(backbone_out_dim * 2, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-        )
-        self.fusion_block2 = nn.Sequential(
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.25),
-        )
-        self.fusion_block3 = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Dropout(0.2),
+            nn.Linear(256, 22),
+            nn.Tanh(),  # 限制到 [-1, 1] 匹配归一化目标
         )
 
-        # 参数预测头
-        self.param_head = nn.Linear(128, 22)
-
-        # 冻结骨干网络前层
-        for param in self.backbone[:-2].parameters():
-            param.requires_grad = False
+    def _prepare_input(self, src: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        """拼接 src(RGB+HSV) + ref(RGB+HSV) = 12 通道"""
+        src_hsv = rgb_to_hsv(src)  # (B, 3, H, W)
+        ref_hsv = rgb_to_hsv(ref)
+        # 12 通道: [src_R, src_G, src_B, src_H, src_S, src_V,
+        #          ref_R, ref_G, ref_B, ref_H, ref_S, ref_V]
+        return torch.cat([src, src_hsv, ref, ref_hsv], dim=1)
 
     def forward(self, src: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-        src_feat = self.backbone(src).flatten(1)
-        ref_feat = self.backbone(ref).flatten(1)
+        # 准备 12 通道输入
+        x = self._prepare_input(src, ref)  # (B, 12, H, W)
 
-        combined = torch.cat([src_feat, ref_feat], dim=1)
+        # CNN 主干
+        x = self.stem(x)        # (B, 64, 192, 192)
+        x = self.stage1(x)      # (B, 96, 96, 96)
+        x = self.stage2(x)      # (B, 128, 48, 48)
+        x = self.stage3(x)      # (B, 192, 24, 24)
+        x = self.stage4(x)      # (B, 256, 12, 12)
 
-        x = self.fusion_block1(combined)
-        x = self.fusion_block2(x)
-        x = self.fusion_block3(x)
+        # 全局统计
+        avg_pool = x.mean(dim=[2, 3])  # (B, 256)
+        max_pool, _ = x.flatten(2).max(dim=2)  # (B, 256)
+        std_pool = x.flatten(2).std(dim=2)  # (B, 256)
 
-        params = self.param_head(x)
+        global_feat = torch.cat([avg_pool, max_pool, std_pool], dim=1)  # (B, 768)
+
+        # 回归头
+        params = self.head(global_feat)  # (B, 22)
         return params
 
 
 def count_parameters(model: nn.Module) -> int:
-    """计算模型参数总数"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+# 兼容旧代码
+ParamPredictorWithSkip = ParamPredictor
+
+
 if __name__ == '__main__':
-    # 测试模型
-    model = ParamPredictor('resnet18', pretrained=True)
-    print(f"模型参数数: {count_parameters(model):,}")
+    model = ParamPredictor()
+    print(f"参数量: {count_parameters(model):,}")
 
-    # 伪输入
-    src = torch.randn(4, 3, 384, 384)
-    ref = torch.randn(4, 3, 384, 384)
-
-    params = model(src, ref)
-    print(f"输出形状: {params.shape}")  # (4, 22)
-    print(f"输出范围: [{params.min():.2f}, {params.max():.2f}]")
+    src = torch.rand(4, 3, 384, 384)
+    ref = torch.rand(4, 3, 384, 384)
+    with torch.no_grad():
+        out = model(src, ref)
+    print(f"输出 shape: {out.shape}")
+    print(f"输出范围: [{out.min().item():.3f}, {out.max().item():.3f}]")

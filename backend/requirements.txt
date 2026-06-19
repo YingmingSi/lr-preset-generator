@@ -5,4 +5,5 @@ Pillow
 numpy
 scikit-image
 rawpy
-anthropic
+torch
+torchvision
