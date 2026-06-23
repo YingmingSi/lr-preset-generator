@@ -1,14 +1,10 @@
-# 强制 CPU-only PyTorch（+cpu 后缀保证不下 CUDA 版）
---extra-index-url https://download.pytorch.org/whl/cpu
-
 fastapi
 uvicorn
 python-multipart
 Pillow
 numpy
-scikit-image
+scipy
 rawpy
 
-# CPU PyTorch（运行时 ~200MB vs CUDA 版 ~600MB+）
-torch==2.4.1+cpu
-torchvision==0.19.1+cpu
+# ONNX Runtime CPU 推理（替代 torch，~50MB vs ~250MB）
+onnxruntime

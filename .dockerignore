@@ -29,3 +29,6 @@ __pycache__/
 # 备份文件
 *.bak
 backend/models/*.bak
+
+# PyTorch 模型（生产只用 ONNX）
+backend/models/*.pt
