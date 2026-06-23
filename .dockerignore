@@ -1,0 +1,31 @@
+# Railway/Docker 部署时排除的内容
+# Dockerfile 只 COPY backend/，但这里加保险
+
+# 前端（部署到 Vercel）
+frontend/
+
+# 训练代码（本地开发用）
+training/
+
+# 文档
+*.md
+
+# 开发配置
+.claude/
+.git/
+.gitignore
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# 备份文件
+*.bak
+backend/models/*.bak
