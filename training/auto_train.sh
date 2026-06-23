@@ -1,5 +1,5 @@
 #!/bin/bash
-# 等数据完成 → 自动启动训练（v4: simple_color CNN）
+# 等数据完成 → 自动启动训练（v5: simple_color CNN + 双 loss）
 
 set -e
 cd "$(dirname "$0")"
@@ -26,7 +26,7 @@ done
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
-echo "🚀 启动训练（simple_color CNN + 按照片划分 + 课程数据）"
+echo "🚀 启动训练（simple_color CNN + 双 loss）"
 echo "═══════════════════════════════════════════════════════"
 
 rm -rf checkpoints
@@ -40,7 +40,9 @@ python train.py \
     --output-dir ./checkpoints \
     --device cuda \
     --num-workers 4 \
-    --seed 42
+    --seed 42 \
+    --param-loss-weight 1.0 \
+    --pixel-loss-weight 1.0
 
 echo ""
 echo "═══════════════════════════════════════════════════════"

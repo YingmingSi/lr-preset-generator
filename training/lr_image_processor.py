@@ -188,30 +188,38 @@ def apply_hsl_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
 
 
 def apply_split_toning(img: np.ndarray, params: dict) -> np.ndarray:
-    """Split Toning：阴影和高光区域分别添加色调"""
+    """
+    Split Toning：阴影和高光区域分别添加色调。
+
+    线性化版本（v2）：tint 使用饱和度=1 的纯色，混合强度 = mask * 0.6 * sat。
+    这样 sat 线性控制效果强度（更接近真实 Lightroom 行为）。
+    与可微 PyTorch 版完全一致。
+    """
     shadow_hue = params.get('SplitToningShadowHue', 0)
     shadow_sat = params.get('SplitToningShadowSaturation', 0) / 100.0
     highlight_hue = params.get('SplitToningHighlightHue', 0)
     highlight_sat = params.get('SplitToningHighlightSaturation', 0) / 100.0
 
-    if shadow_sat == 0 and highlight_sat == 0:
+    if shadow_sat <= 0 and highlight_sat <= 0:
         return img
 
     lum = img.mean(axis=2, keepdims=True)
 
-    # 阴影上色：增强强度 0.3 → 0.6
+    # 阴影上色：tint 用纯色（sat=1），混合强度按 sat 线性递增
     if shadow_sat > 0:
-        sh_color = hsv_to_single(shadow_hue / 360.0, shadow_sat, 1.0)
+        sh_color = hsv_to_single(shadow_hue / 360.0, 1.0, 1.0)
         mask = np.clip((0.5 - lum) * 2, 0, 1)
+        blend = mask[..., 0] * 0.6 * shadow_sat
         for c in range(3):
-            img[..., c] = img[..., c] * (1 - mask[..., 0] * 0.6) + sh_color[c] * mask[..., 0] * 0.6
+            img[..., c] = img[..., c] * (1 - blend) + sh_color[c] * blend
 
-    # 高光上色：增强 0.3 → 0.6
+    # 高光上色：同样的线性化
     if highlight_sat > 0:
-        hi_color = hsv_to_single(highlight_hue / 360.0, highlight_sat, 1.0)
+        hi_color = hsv_to_single(highlight_hue / 360.0, 1.0, 1.0)
         mask = np.clip((lum - 0.5) * 2, 0, 1)
+        blend = mask[..., 0] * 0.6 * highlight_sat
         for c in range(3):
-            img[..., c] = img[..., c] * (1 - mask[..., 0] * 0.6) + hi_color[c] * mask[..., 0] * 0.6
+            img[..., c] = img[..., c] * (1 - blend) + hi_color[c] * blend
 
     return np.clip(img, 0, 1)
 

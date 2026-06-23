@@ -100,7 +100,7 @@ async def health():
     return {
         "status": "ok",
         "cnn_loaded": cnn_ready(),
-        "cnn_model": "color_cnn_v4 (R²=0.73)" if cnn_ready() else None,
+        "cnn_model": "color_cnn_v5 (R²=0.73, pixel_RMSE=3.9%)" if cnn_ready() else None,
     }
 
 

@@ -22,6 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 from cnn_model import ParamPredictor, ParamPredictorWithSkip, count_parameters
 from dataset import create_dataloaders
 from param_normalizer import ParamNormalizer
+from lr_image_processor_torch import apply_lr_params_torch
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -39,13 +40,18 @@ class Trainer:
         device: torch.device,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
+        pixel_loss_weight: float = 1.0,
+        param_loss_weight: float = 1.0,
     ):
         self.model = model.to(device)
         self.device = device
         self.normalizer = ParamNormalizer()
 
-        # 损失函数：MSE（L1 在目标均值附近梯度恒定，激励模型塌缩到中心）
+        # 双损失：参数空间 MSE + 像素空间 MSE
+        # 像素 loss 让模型学到"预测参数应用后真正还原图像"
         self.criterion = nn.MSELoss()
+        self.pixel_w = pixel_loss_weight
+        self.param_w = param_loss_weight
 
         # 优化器：AdamW
         self.optimizer = optim.AdamW(
@@ -65,10 +71,10 @@ class Trainer:
             eta_min=1e-5,
         )
 
-    def train_epoch(self, train_loader) -> float:
-        """训练一个 epoch，返回平均损失"""
+    def train_epoch(self, train_loader) -> dict:
+        """训练一个 epoch，返回各损失分量"""
         self.model.train()
-        total_loss = 0.0
+        total_loss = total_param = total_pixel = 0.0
 
         for batch_idx, batch in enumerate(train_loader):
             src = batch['src'].to(self.device)
@@ -78,8 +84,17 @@ class Trainer:
             # 前向传播
             pred_params = self.model(src, ref)
 
-            # 计算损失
-            loss = self.criterion(pred_params, params)
+            # 参数空间损失
+            loss_param = self.criterion(pred_params, params)
+
+            # 像素空间损失：用预测参数渲染 src，对比 ref
+            if self.pixel_w > 0:
+                rendered = apply_lr_params_torch(src, pred_params)
+                loss_pixel = self.criterion(rendered, ref)
+            else:
+                loss_pixel = torch.zeros(1, device=self.device)
+
+            loss = self.param_w * loss_param + self.pixel_w * loss_pixel
 
             # 反向传播
             self.optimizer.zero_grad()
@@ -87,16 +102,23 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
-            total_loss += loss.item()
+            total_loss  += loss.item()
+            total_param += loss_param.item()
+            total_pixel += loss_pixel.item()
 
             if (batch_idx + 1) % 50 == 0:
                 logger.info(
                     f"  Batch {batch_idx + 1}/{len(train_loader)}, "
-                    f"Loss: {loss.item():.6f}"
+                    f"Loss: {loss.item():.6f} "
+                    f"(param: {loss_param.item():.4f}, pixel: {loss_pixel.item():.4f})"
                 )
 
-        avg_loss = total_loss / len(train_loader)
-        return avg_loss
+        n = len(train_loader)
+        return {
+            'loss':       total_loss / n,
+            'param_loss': total_param / n,
+            'pixel_loss': total_pixel / n,
+        }
 
     @torch.no_grad()
     def evaluate(self, val_loader) -> dict:
@@ -211,6 +233,10 @@ def main():
                         help='恢复训练的检查点路径')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
+    parser.add_argument('--pixel-loss-weight', type=float, default=1.0,
+                        help='像素重构损失权重（0 = 仅参数 loss）')
+    parser.add_argument('--param-loss-weight', type=float, default=1.0,
+                        help='参数 MSE 损失权重')
 
     args = parser.parse_args()
 
@@ -243,7 +269,13 @@ def main():
     logger.info(f"模型参数数: {count_parameters(model):,}")
 
     # 创建训练器
-    trainer = Trainer(model, device, lr=args.lr, weight_decay=args.weight_decay)
+    trainer = Trainer(
+        model, device,
+        lr=args.lr, weight_decay=args.weight_decay,
+        pixel_loss_weight=args.pixel_loss_weight,
+        param_loss_weight=args.param_loss_weight,
+    )
+    logger.info(f"损失权重: param={args.param_loss_weight}, pixel={args.pixel_loss_weight}")
     trainer.set_scheduler(args.epochs)
 
     # TensorBoard 日志
@@ -267,8 +299,12 @@ def main():
         logger.info(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
 
         # 训练
-        train_loss = trainer.train_epoch(train_loader)
-        logger.info(f"训练损失: {train_loss:.6f}")
+        train_losses = trainer.train_epoch(train_loader)
+        logger.info(
+            f"训练损失: {train_losses['loss']:.6f} "
+            f"(param: {train_losses['param_loss']:.4f}, "
+            f"pixel: {train_losses['pixel_loss']:.4f})"
+        )
 
         # 验证
         val_metrics = trainer.evaluate(val_loader)
@@ -286,7 +322,9 @@ def main():
             logger.info(f"  ... ({len(val_metrics['param_mae'])} 个参数总计)")
 
         # TensorBoard 日志
-        writer.add_scalar('loss/train', train_loss, epoch)
+        writer.add_scalar('loss/train_total', train_losses['loss'], epoch)
+        writer.add_scalar('loss/train_param', train_losses['param_loss'], epoch)
+        writer.add_scalar('loss/train_pixel', train_losses['pixel_loss'], epoch)
         writer.add_scalar('loss/val', val_metrics['loss'], epoch)
         writer.add_scalar('metrics/val_mae', val_metrics['mae'], epoch)
         writer.add_scalar('metrics/val_rmse', val_metrics['rmse'], epoch)

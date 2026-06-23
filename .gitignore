@@ -33,3 +33,4 @@ training/*.log
 .env
 .DS_Store
 *.log
+backend/models/*.bak
