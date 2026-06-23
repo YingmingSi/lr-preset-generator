@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 import sys
 import os
+import gc
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -141,7 +142,7 @@ async def analyze(
         summary     = params_summary(luminance_params, color_params, empty_scene)
         curve_style = luminance_params.get('_curve_style', '')
 
-        return JSONResponse({
+        response = JSONResponse({
             "success":              True,
             "mode":                 mode,
             "summary":              summary,
@@ -151,6 +152,11 @@ async def analyze(
             "curve_style":          curve_style,
             "cnn_used":             cnn_params is not None,
         })
+        # 释放大对象 + GC（内存受限部署环境）
+        del ref_data, src_data, ref_bytes, src_bytes
+        del luminance_params, color_params, cnn_params
+        gc.collect()
+        return response
 
     except HTTPException:
         raise

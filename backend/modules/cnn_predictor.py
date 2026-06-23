@@ -224,6 +224,9 @@ class CNNParameterPredictor:
         normalized = pred.squeeze(0).cpu().numpy()
         params = self._denormalize(normalized)
 
+        # 释放中间张量（内存敏感的部署环境）
+        del src_t, ref_t, pred
+
         # 安全约束（颜色分级饱和度限制 15，避免过饱和）
         params['SplitToningShadowSaturation'] = min(
             params['SplitToningShadowSaturation'], 15
