@@ -140,13 +140,14 @@ class CNNParameterPredictor:
         del src_arr, ref_arr, pred
         gc.collect()
 
-        # 安全约束（颜色分级饱和度限制 15）
-        params['SplitToningShadowSaturation'] = min(
-            params['SplitToningShadowSaturation'], 15
-        )
-        params['SplitToningHighlightSaturation'] = min(
-            params['SplitToningHighlightSaturation'], 15
-        )
+        # 安全约束（SplitToning sat ≤ 5：分布外场景下 SplitToning 容易被滥用，
+        # 视觉效果比真实 LR 强烈，hard clamp 为保险）
+        params['SplitToningShadowSaturation'] = max(0, min(
+            params['SplitToningShadowSaturation'], 5
+        ))
+        params['SplitToningHighlightSaturation'] = max(0, min(
+            params['SplitToningHighlightSaturation'], 5
+        ))
         return params
 
 

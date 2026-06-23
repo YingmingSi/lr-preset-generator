@@ -260,22 +260,22 @@ def apply_lr_params_torch(src: torch.Tensor, params_norm: torch.Tensor) -> torch
 
     lum = img.mean(dim=1, keepdim=True)
 
-    # 阴影上色：tint 用饱和度=1 的纯色，blend 按 sh_sat 线性递增
+    # 阴影上色：强度 0.3（v3 调整，原 0.6）
     sh_tint_hsv = torch.stack(
         [sh_hue, torch.ones_like(sh_hue), torch.ones_like(sh_hue)], dim=-1
     ).view(-1, 3, 1, 1)
     sh_tint_rgb = hsv_to_rgb(sh_tint_hsv)
     sh_mask = ((0.5 - lum) * 2.0).clamp(0, 1)
-    sh_factor = sh_mask * _bcast(0.6 * sh_sat)
+    sh_factor = sh_mask * _bcast(0.3 * sh_sat)
     img = img * (1.0 - sh_factor) + sh_tint_rgb * sh_factor
 
-    # 高光上色
+    # 高光上色（强度 0.3）
     hi_tint_hsv = torch.stack(
         [hi_hue, torch.ones_like(hi_hue), torch.ones_like(hi_hue)], dim=-1
     ).view(-1, 3, 1, 1)
     hi_tint_rgb = hsv_to_rgb(hi_tint_hsv)
     hi_mask = ((lum - 0.5) * 2.0).clamp(0, 1)
-    hi_factor = hi_mask * _bcast(0.6 * hi_sat)
+    hi_factor = hi_mask * _bcast(0.3 * hi_sat)
     img = img * (1.0 - hi_factor) + hi_tint_rgb * hi_factor
 
     return img.clamp(0, 1)
