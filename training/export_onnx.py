@@ -51,6 +51,16 @@ def export_model(pt_path: str, onnx_path: str):
         do_constant_folding=True,
     )
 
+    # 关键：合并外部权重为单文件（生产部署需要）
+    import onnx
+    from onnx.external_data_helper import load_external_data_for_model
+    m = onnx.load(onnx_path, load_external_data=True)
+    onnx.save(m, onnx_path, save_as_external_data=False)
+    ext_path = onnx_path + '.data'
+    if os.path.exists(ext_path):
+        os.remove(ext_path)
+        print(f"  ✓ 已合并外部权重到单文件")
+
     # 文件大小
     pt_size = os.path.getsize(pt_path) / 1024 / 1024
     onnx_size = os.path.getsize(onnx_path) / 1024 / 1024
