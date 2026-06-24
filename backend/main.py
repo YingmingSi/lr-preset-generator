@@ -49,7 +49,10 @@ app.add_middleware(
 
 
 def _inject_cnn_params(luminance_params: dict, color_params: dict, cnn_params: dict):
-    """把 CNN 预测的 22 维参数注入到 luminance/color 字典"""
+    """
+    把 CNN 预测的 22 维参数注入到 luminance/color 字典。
+    同时清零 CNN 没预测的 ColorGrade 参数（避免传统分析的高数值主导颜色）。
+    """
     LUM_KEYS = ('Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites',
                 'Contrast', 'Clarity')
     COLOR_KEYS = ('Saturation', 'Vibrance',
@@ -66,6 +69,18 @@ def _inject_cnn_params(luminance_params: dict, color_params: dict, cnn_params: d
     for k in COLOR_KEYS:
         if k in cnn_params:
             color_params[k] = cnn_params[k]
+
+    # 清零 CNN 没预测但传统分析可能产生的"现代颜色分级"参数。
+    # 这些参数（ColorGrade*）不在 CNN 22 维输出中，由 color_analyzer
+    # 独立计算，对分布外照片往往产生过高数值（如 MidtoneSat=35），导致
+    # 整体颜色被错误主导。清零让颜色完全由 CNN 预测的 HSL + SplitToning 决定。
+    COLOR_GRADE_RESET_KEYS = (
+        'ColorGradeMidtoneHue', 'ColorGradeMidtoneSat', 'ColorGradeMidtoneLum',
+        'ColorGradeShadowLum', 'ColorGradeHighlightLum',
+        'ColorGradeGlobalHue', 'ColorGradeGlobalSat', 'ColorGradeGlobalLum',
+    )
+    for k in COLOR_GRADE_RESET_KEYS:
+        color_params[k] = 0
 
 
 def _align_src_to_ref(src_data, ref_data):
