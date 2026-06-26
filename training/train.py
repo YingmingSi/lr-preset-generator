@@ -71,6 +71,18 @@ class Trainer:
             eta_min=1e-5,
         )
 
+    def set_stage(self, mask, pixel_w: float):
+        """设置课程阶段：参数掩码 + 像素 loss 权重"""
+        self.param_mask = torch.tensor(mask, device=self.device, dtype=torch.float32)
+        self.pixel_w = pixel_w
+
+    def _masked_param_loss(self, pred, target):
+        """只在激活参数上计算 MSE"""
+        if not hasattr(self, 'param_mask'):
+            return self.criterion(pred, target)
+        se = (pred - target) ** 2 * self.param_mask
+        return se.sum() / (self.param_mask.sum() * pred.shape[0] + 1e-8)
+
     def train_epoch(self, train_loader) -> dict:
         """训练一个 epoch，返回各损失分量"""
         self.model.train()
@@ -84,8 +96,8 @@ class Trainer:
             # 前向传播
             pred_params = self.model(src, ref)
 
-            # 参数空间损失
-            loss_param = self.criterion(pred_params, params)
+            # 参数空间损失（掩码到当前 stage 激活参数）
+            loss_param = self._masked_param_loss(pred_params, params)
 
             # 像素空间损失：用预测参数渲染 src，对比 ref
             if self.pixel_w > 0:
@@ -158,19 +170,16 @@ class Trainer:
         ss_res = np.sum((all_targets_denorm - all_preds_denorm) ** 2, axis=0)
         ss_tot = np.sum((all_targets_denorm - np.mean(all_targets_denorm, axis=0)) ** 2, axis=0)
         r2_scores = 1 - (ss_res / (ss_tot + 1e-10))
-        r2_mean = np.mean(r2_scores)
 
-        # 按参数分组的 MAE（便于诊断）
-        param_names = [
-            'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
-            'Saturation', 'Vibrance', 'Clarity',
-            'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
-            'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
-            'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
-            'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
-            'SplitToningShadowHue', 'SplitToningShadowSaturation',
-            'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
-        ]
+        # R² 均值只在当前 stage 激活参数上计算（更有意义）
+        from params_config import PARAM_ORDER
+        param_names = list(PARAM_ORDER)
+        if hasattr(self, 'param_mask'):
+            mask_np = self.param_mask.cpu().numpy().astype(bool)
+            r2_mean = float(np.mean(r2_scores[mask_np])) if mask_np.any() else 0.0
+        else:
+            r2_mean = float(np.mean(r2_scores))
+
         # 按参数 MAE（使用反归一化值，与全局 MAE 一致）
         param_mae = {
             name: float(np.mean(np.abs(all_preds_denorm[:, i] - all_targets_denorm[:, i])))
@@ -233,10 +242,14 @@ def main():
                         help='恢复训练的检查点路径')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
-    parser.add_argument('--pixel-loss-weight', type=float, default=1.0,
-                        help='像素重构损失权重（0 = 仅参数 loss）')
+    parser.add_argument('--pixel-loss-weight', type=float, default=0.3,
+                        help='像素重构损失权重（仅最后 stage 生效）')
     parser.add_argument('--param-loss-weight', type=float, default=1.0,
                         help='参数 MSE 损失权重')
+    parser.add_argument('--stage-epochs', type=str, default='50,50,50,30,30',
+                        help='5 个课程阶段各自的 epoch 数（逗号分隔）')
+    parser.add_argument('--joint', action='store_true',
+                        help='联合训练模式：全 72 维一起训 --epochs 轮（不用课程掩码）')
 
     args = parser.parse_args()
 
@@ -285,77 +298,102 @@ def main():
     logger.info(f"日志保存到: {log_dir}")
 
     # 恢复训练（如果指定）
-    start_epoch = 0
     if args.resume:
         logger.info(f"从检查点恢复: {args.resume}")
-        start_epoch = trainer.load_checkpoint(args.resume)
+        trainer.load_checkpoint(args.resume)
 
-    # 训练循环
-    best_val_r2 = -np.inf
-    patience = 20
-    patience_counter = 0
+    # ─── 课程学习 / 联合训练 ─────────────────────────────────────────────
+    from params_config import CURRICULUM_STAGES as _STAGES, stage_mask as _smask, PARAM_ORDER
 
-    for epoch in range(start_epoch, args.epochs):
-        logger.info(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
+    if args.joint:
+        # 联合训练：单阶段全 72 维 + 像素 loss（避免课程掩码饿死后期参数）
+        CURRICULUM_STAGES = [('joint_all72', PARAM_ORDER)]
+        stage_epochs = [args.epochs]
+        def stage_mask(i):
+            return [1.0] * len(PARAM_ORDER)
+        logger.info(f"🔀 联合训练模式：全 {len(PARAM_ORDER)} 维，{args.epochs} epoch")
+    else:
+        CURRICULUM_STAGES = _STAGES
+        stage_mask = _smask
+        stage_epochs = [int(x) for x in args.stage_epochs.split(',')]
+        assert len(stage_epochs) == len(CURRICULUM_STAGES), \
+            f"stage_epochs 需 {len(CURRICULUM_STAGES)} 个值"
 
-        # 训练
-        train_losses = trainer.train_epoch(train_loader)
-        logger.info(
-            f"训练损失: {train_losses['loss']:.6f} "
-            f"(param: {train_losses['param_loss']:.4f}, "
-            f"pixel: {train_losses['pixel_loss']:.4f})"
-        )
+    patience = 15
+    global_epoch = 0
+    best_overall_r2 = -np.inf
+    best_ckpt_path = None
 
-        # 验证
-        val_metrics = trainer.evaluate(val_loader)
-        logger.info(
-            f"验证损失: {val_metrics['loss']:.6f}, "
-            f"MAE: {val_metrics['mae']:.4f}, "
-            f"RMSE: {val_metrics['rmse']:.4f}, "
-            f"R²: {val_metrics['r2_mean']:.4f}"
-        )
+    for si, (stage_name, stage_params) in enumerate(CURRICULUM_STAGES):
+        mask = stage_mask(si)
+        is_last = (si == len(CURRICULUM_STAGES) - 1)
+        pixel_w = args.pixel_loss_weight if is_last else 0.0
+        trainer.set_stage(mask, pixel_w)
+        trainer.set_scheduler(stage_epochs[si])
 
-        # 按参数输出 MAE
-        for param_name, mae in list(val_metrics['param_mae'].items())[:5]:
-            logger.info(f"  {param_name}: MAE={mae:.4f}")
-        if len(val_metrics['param_mae']) > 5:
-            logger.info(f"  ... ({len(val_metrics['param_mae'])} 个参数总计)")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"📚 Stage {si+1}/{len(CURRICULUM_STAGES)}: {stage_name}")
+        logger.info(f"   激活参数: {len(stage_params)} 维  |  像素 loss: {pixel_w}")
+        logger.info(f"{'='*60}")
 
-        # TensorBoard 日志
-        writer.add_scalar('loss/train_total', train_losses['loss'], epoch)
-        writer.add_scalar('loss/train_param', train_losses['param_loss'], epoch)
-        writer.add_scalar('loss/train_pixel', train_losses['pixel_loss'], epoch)
-        writer.add_scalar('loss/val', val_metrics['loss'], epoch)
-        writer.add_scalar('metrics/val_mae', val_metrics['mae'], epoch)
-        writer.add_scalar('metrics/val_rmse', val_metrics['rmse'], epoch)
-        writer.add_scalar('metrics/val_r2', val_metrics['r2_mean'], epoch)
+        best_stage_r2 = -np.inf
+        patience_counter = 0
 
-        # 学习率调度
-        if trainer.scheduler:
-            trainer.scheduler.step()
-            current_lr = trainer.optimizer.param_groups[0]['lr']
-            logger.info(f"学习率: {current_lr:.2e}")
-
-        # 保存最佳模型
-        if val_metrics['r2_mean'] > best_val_r2:
-            best_val_r2 = val_metrics['r2_mean']
-            patience_counter = 0
-            ckpt_path = os.path.join(
-                args.output_dir,
-                f'best_model_epoch{epoch:03d}_r2{best_val_r2:.4f}.pt'
+        for e in range(stage_epochs[si]):
+            logger.info(f"\n--- [{stage_name}] Epoch {e+1}/{stage_epochs[si]} "
+                        f"(全局 {global_epoch+1}) ---")
+            train_losses = trainer.train_epoch(train_loader)
+            logger.info(
+                f"训练损失: {train_losses['loss']:.6f} "
+                f"(param: {train_losses['param_loss']:.4f}, "
+                f"pixel: {train_losses['pixel_loss']:.4f})"
             )
-            trainer.save_checkpoint(ckpt_path, epoch, val_metrics)
-        else:
-            patience_counter += 1
+            val_metrics = trainer.evaluate(val_loader)
+            logger.info(
+                f"验证 MAE: {val_metrics['mae']:.4f}, "
+                f"R²(激活): {val_metrics['r2_mean']:.4f}"
+            )
+
+            writer.add_scalar(f'{stage_name}/train_param', train_losses['param_loss'], e)
+            writer.add_scalar(f'{stage_name}/train_pixel', train_losses['pixel_loss'], e)
+            writer.add_scalar(f'{stage_name}/val_r2', val_metrics['r2_mean'], e)
+
+            if trainer.scheduler:
+                trainer.scheduler.step()
+
+            # stage 内早停 + 保存全局最佳
+            r2 = val_metrics['r2_mean']
+            if r2 > best_stage_r2:
+                best_stage_r2 = r2
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if r2 > best_overall_r2 or is_last:
+                # 最后 stage 总是保存（覆盖为全 72 维训练的权重）
+                if r2 > best_overall_r2:
+                    best_overall_r2 = r2
+                ckpt_path = os.path.join(
+                    args.output_dir,
+                    f'best_model_{stage_name}_r2{r2:.4f}.pt')
+                trainer.save_checkpoint(ckpt_path, global_epoch, val_metrics)
+                if is_last:
+                    best_ckpt_path = ckpt_path
+
+            global_epoch += 1
+            writer.flush()
+
             if patience_counter >= patience:
-                logger.info(f"早停（无进展 {patience} 个 epoch）")
+                logger.info(f"  [{stage_name}] 早停（{patience} epoch 无进展）")
                 break
 
-        writer.flush()
+        logger.info(f"✓ Stage {si+1} 完成，最佳 R²(激活)={best_stage_r2:.4f}")
 
-    # 测试集评估
-    logger.info("\n=== 测试集评估 ===")
+    # ─── 测试集评估（全 72 维）────────────────────────────────────────
+    logger.info("\n=== 测试集评估（全部 72 参数）===")
+    trainer.set_stage([1.0] * len(PARAM_ORDER), 0.0)
     test_metrics = trainer.evaluate(test_loader)
+    best_val_r2 = best_overall_r2
     logger.info(
         f"测试损失: {test_metrics['loss']:.6f}, "
         f"MAE: {test_metrics['mae']:.4f}, "

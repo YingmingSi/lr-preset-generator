@@ -56,10 +56,11 @@ DEFAULT_PARAMS = {
     'SplitToningHighlightHue': 0,
     'SplitToningHighlightSaturation': 0,
     'SplitToningBalance': 0,
-    'ColorGradeMidtoneHue': 0,
-    'ColorGradeMidtoneSat': 0,
-    'ColorGradeShadowLum': 0,
-    'ColorGradeHighlightLum': 0,
+    # 现代颜色分级（3 区 H/S/L + Balance + Blending）
+    'ColorGradeShadowHue': 0,    'ColorGradeShadowSat': 0,    'ColorGradeShadowLum': 0,
+    'ColorGradeMidtoneHue': 0,   'ColorGradeMidtoneSat': 0,   'ColorGradeMidtoneLum': 0,
+    'ColorGradeHighlightHue': 0, 'ColorGradeHighlightSat': 0, 'ColorGradeHighlightLum': 0,
+    'ColorGradeBalance': 0,      'ColorGradeBlending': 50,
     'GrainAmount': 0,
     # 相机校准面板
     'ShadowTint':      0,
@@ -72,6 +73,69 @@ DEFAULT_PARAMS = {
 }
 
 NEUTRAL_CURVE = [(0, 0), (64, 64), (128, 128), (192, 192), (255, 255)]
+
+# 色调曲线 5 个控制点的 x 坐标（与训练 LumaCurve0-4 对应）
+_CURVE_X = [0, 64, 128, 192, 255]
+
+
+def _offsets_to_curve(offsets: list) -> list:
+    """5 个 y 偏移 → XMP 点曲线 [(x, y), ...]，y = clip(x + offset, 0, 255)"""
+    return [(x, int(max(0, min(255, x + off)))) for x, off in zip(_CURVE_X, offsets)]
+
+
+# CNN 72 维参数 → XMP 占位符名的映射（大部分同名，少数需重命名）
+# 这些参数名与 params_config.PARAM_ORDER 一致
+def generate_xmp_from_cnn(cnn_params: dict, preset_name: str = "AI生成预设",
+                          description: str = "AI生成预设") -> str:
+    """
+    用 CNN 预测的 72 维参数直接生成 XMP（双图模式）。
+    CNN 覆盖所有创作参数；其余（降噪/颗粒等）用默认值。
+    """
+    merged = dict(DEFAULT_PARAMS)
+
+    # 直接同名映射的参数（亮度 + HSL + 颜色分级 + 校准）
+    for k, v in cnn_params.items():
+        if k in merged or k.startswith(('Hue', 'Saturation', 'Luminance', 'ColorGrade')):
+            merged[k] = v
+    # 确保关键参数写入（即使不在 DEFAULT_PARAMS）
+    for k in ('Exposure', 'Contrast', 'Highlights', 'Shadows', 'Blacks', 'Whites',
+              'Texture', 'Clarity', 'Dehaze', 'Vibrance', 'Saturation',
+              'ColorGradeShadowHue', 'ColorGradeShadowSat', 'ColorGradeShadowLum',
+              'ColorGradeMidtoneHue', 'ColorGradeMidtoneSat', 'ColorGradeMidtoneLum',
+              'ColorGradeHighlightHue', 'ColorGradeHighlightSat', 'ColorGradeHighlightLum',
+              'ColorGradeBalance', 'ColorGradeBlending',
+              'RedHue', 'RedSaturation', 'GreenHue', 'GreenSaturation',
+              'BlueHue', 'BlueSaturation'):
+        if k in cnn_params:
+            merged[k] = cnn_params[k]
+
+    # SplitToning 强制 0（用现代颜色分级取代）
+    for k in ('SplitToningShadowHue', 'SplitToningShadowSaturation',
+              'SplitToningHighlightHue', 'SplitToningHighlightSaturation'):
+        merged[k] = 0
+
+    # 色调曲线：5 偏移 → 点曲线
+    luma_curve  = _offsets_to_curve([cnn_params.get(f'LumaCurve{i}', 0) for i in range(5)])
+    red_curve   = _offsets_to_curve([cnn_params.get(f'RedCurve{i}', 0) for i in range(5)])
+    green_curve = _offsets_to_curve([cnn_params.get(f'GreenCurve{i}', 0) for i in range(5)])
+    blue_curve  = _offsets_to_curve([cnn_params.get(f'BlueCurve{i}', 0) for i in range(5)])
+
+    template_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                 'templates', 'preset_template.xmp')
+    with open(template_path, 'r', encoding='utf-8') as f:
+        xmp = f.read()
+
+    for key, value in merged.items():
+        xmp = xmp.replace('{' + key + '}', str(value))
+
+    xmp = xmp.replace('{ToneCurvePV2012}',      format_tone_curve_xml(luma_curve))
+    xmp = xmp.replace('{ToneCurvePV2012Red}',   format_tone_curve_xml(red_curve))
+    xmp = xmp.replace('{ToneCurvePV2012Green}', format_tone_curve_xml(green_curve))
+    xmp = xmp.replace('{ToneCurvePV2012Blue}',  format_tone_curve_xml(blue_curve))
+    xmp = xmp.replace('{UUID}',        str(uuid.uuid4()).upper())
+    xmp = xmp.replace('{PresetName}',  preset_name)
+    xmp = xmp.replace('{Description}', description)
+    return xmp
 
 
 def generate_xmp(

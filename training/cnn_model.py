@@ -9,7 +9,7 @@
   5. 单一回归 head（不要多任务头）
 
 输入: src (B, 3, H, W) + ref (B, 3, H, W)
-内部: 计算 HSV，拼接 RGB+HSV (12 通道) → CNN → 22 维参数
+内部: 计算 HSV，拼接 RGB+HSV (12 通道) → CNN → 72 维参数
 """
 
 import torch
@@ -17,16 +17,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-PARAM_NAMES = [
-    'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
-    'Saturation', 'Vibrance', 'Clarity',
-    'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
-    'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
-    'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
-    'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
-    'SplitToningShadowHue', 'SplitToningShadowSaturation',
-    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
-]
+from params_config import PARAM_ORDER
+
+PARAM_NAMES = PARAM_ORDER  # 72 维
+N_PARAMS = len(PARAM_ORDER)
 
 
 def rgb_to_hsv(rgb: torch.Tensor) -> torch.Tensor:
@@ -80,13 +74,13 @@ class ParamPredictor(nn.Module):
     色彩映射 CNN
 
     输入: src (B, 3, H, W), ref (B, 3, H, W) 已经归一化到 [0, 1]
-    输出: (B, 22) 参数预测（Tanh 限制到 [-1, 1]）
+    输出: (B, 72) 参数预测（Tanh 限制到 [-1, 1]）
 
     架构:
       1. 把 src 和 ref 都计算 RGB+HSV (6 通道每张)
       2. 在通道维度堆叠: 12 通道
       3. 简单 CNN 提取空间特征 (384→12)
-      4. 全局池化 + MLP → 22
+      4. 全局池化 + MLP → 72
     """
 
     def __init__(self, backbone: str = 'simple_color', pretrained: bool = False):
@@ -115,7 +109,7 @@ class ParamPredictor(nn.Module):
             nn.Linear(512, 256),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(256, 22),
+            nn.Linear(256, N_PARAMS),
             nn.Tanh(),  # 限制到 [-1, 1] 匹配归一化目标
         )
 
@@ -146,7 +140,7 @@ class ParamPredictor(nn.Module):
         global_feat = torch.cat([avg_pool, max_pool, std_pool], dim=1)  # (B, 768)
 
         # 回归头
-        params = self.head(global_feat)  # (B, 22)
+        params = self.head(global_feat)  # (B, 72)
         return params
 
 

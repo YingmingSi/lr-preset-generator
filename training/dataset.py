@@ -18,18 +18,9 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 
 from param_normalizer import ParamNormalizer
+from params_config import PARAM_ORDER
 
-
-PARAM_NAMES = [
-    'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
-    'Saturation', 'Vibrance', 'Clarity',
-    'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
-    'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
-    'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
-    'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
-    'SplitToningShadowHue', 'SplitToningShadowSaturation',
-    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
-]
+PARAM_NAMES = PARAM_ORDER  # 72 维
 
 
 class PresetDataset(Dataset):
@@ -41,7 +32,7 @@ class PresetDataset(Dataset):
         split: str = 'train',
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
-        img_size: int = 384,
+        img_size: int = 256,
         seed: int = 42,
     ):
         self.data_dir = Path(data_dir)
@@ -131,7 +122,7 @@ def create_dataloaders(
     data_dir: str,
     batch_size: int = 32,
     num_workers: int = 4,
-    img_size: int = 384,
+    img_size: int = 256,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:

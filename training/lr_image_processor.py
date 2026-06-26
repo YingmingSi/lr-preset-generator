@@ -1,273 +1,328 @@
 """
-Lightroom 风格图像处理器（纯 Python 实现）
+Lightroom 风格图像处理器（72 维参数版，numpy）
 
-绕过 darktable-cli 不支持 Adobe XMP 格式的问题，
-直接在 numpy/PIL 中实现 LR 基础调整。
+把 72 个 LR 参数应用到 RGB 图像，用于生成训练数据。
+与 lr_image_processor_torch.py（可微版）保持像素级一致。
 
-支持的参数（22 个，与 CNN 训练目标对应）：
-  曝光控制: Exposure, Highlights, Shadows, Blacks, Whites, Contrast
-  色彩控制: Saturation, Vibrance, Clarity
-  HSL: Saturation/Hue/Luminance Adjustments (Orange/Aqua/Green/Blue)
-  Split Toning: Shadow/Highlight Hue & Saturation
+处理顺序（近似 LR 内部管线）：
+  1. 校准（RGB 原色 H/S 偏移）
+  2. 曝光 → 对比度 → 高光/阴影/白/黑
+  3. 色调曲线（Luma + RGB 四条）
+  4. Texture / Clarity / Dehaze（局部对比）
+  5. 饱和度 / 鲜艳度
+  6. HSL 混色器（8 色 × H/S/L）
+  7. 颜色分级（阴影/中间调/高光 3 区）
 """
 
 import numpy as np
-from PIL import Image
 import colorsys
+from scipy.ndimage import gaussian_filter
+
+from params_config import HSL_COLORS, HSL_COLOR_HUE
 
 
-def apply_lr_params(img_rgb: np.ndarray, params: dict) -> np.ndarray:
-    """
-    将 LR 参数应用到 RGB 图像。
-
-    Args:
-        img_rgb: (H, W, 3) RGB 图像，值 [0, 255] uint8 或 [0, 1] float
-        params: LR 参数字典
-
-    Returns:
-        调整后的 RGB 图像 (H, W, 3) uint8
-    """
-    # 转 [0, 1] float
-    if img_rgb.dtype == np.uint8:
-        img = img_rgb.astype(np.float32) / 255.0
-    else:
-        img = img_rgb.astype(np.float32)
-
-    # 1. 曝光（Exposure stops，-3 到 +3）
-    exp = params.get('Exposure', 0)
-    if exp != 0:
-        img = img * (2.0 ** exp)
-        img = np.clip(img, 0, 1)
-
-    # 2. 对比度（-100 到 +100，S 曲线）
-    contrast = params.get('Contrast', 0)
-    if contrast != 0:
-        # 简单 S 曲线：以 0.5 为中心
-        amount = contrast / 100.0  # -1 到 1
-        img = 0.5 + (img - 0.5) * (1 + amount)
-        img = np.clip(img, 0, 1)
-
-    # 3. 高光/阴影/黑色/白色（基于亮度分段调整）
-    highlights = params.get('Highlights', 0) / 100.0  # -1 到 1
-    shadows = params.get('Shadows', 0) / 100.0
-    blacks = params.get('Blacks', 0) / 100.0
-    whites = params.get('Whites', 0) / 100.0
-
-    if any([highlights, shadows, blacks, whites]):
-        # 计算亮度（用于权重）
-        lum = img.mean(axis=2, keepdims=True)  # (H, W, 1)
-
-        # 高光区域：增强系数 0.3 → 0.7，效果更明显
-        if highlights != 0:
-            # 软掩码：高光区域（lum > 0.55，超过的指数衰减）
-            mask = np.clip((lum - 0.4) / 0.6, 0, 1) ** 2
-            img = img + highlights * 0.7 * mask
-        # 阴影区域：增强系数 0.3 → 0.7
-        if shadows != 0:
-            mask = np.clip((0.6 - lum) / 0.6, 0, 1) ** 2
-            img = img + shadows * 0.7 * mask
-        # 黑色（最暗 30%）：增强 0.2 → 0.5
-        if blacks != 0:
-            mask = np.clip((0.3 - lum) / 0.3, 0, 1) ** 2
-            img = img + blacks * 0.5 * mask
-        # 白色（最亮 30%）：增强 0.2 → 0.5
-        if whites != 0:
-            mask = np.clip((lum - 0.7) / 0.3, 0, 1) ** 2
-            img = img + whites * 0.5 * mask
-
-        img = np.clip(img, 0, 1)
-
-    # 4. 清晰度（Clarity，中间调对比）：增强 0.15 → 0.4
-    clarity = params.get('Clarity', 0) / 100.0
-    if clarity != 0:
-        mid_mask = 1 - np.abs(img - 0.5) * 2  # 中间调最强
-        img = img + clarity * 0.4 * mid_mask * np.sign(img - 0.5)
-        img = np.clip(img, 0, 1)
-
-    # 5. 饱和度 & 活力（在 HSV 空间调整）
-    saturation = params.get('Saturation', 0) / 100.0
-    vibrance = params.get('Vibrance', 0) / 100.0
-
-    if saturation != 0 or vibrance != 0:
-        hsv = rgb_to_hsv_vectorized(img)
-        s = hsv[..., 1]
-        if saturation != 0:
-            s = s * (1 + saturation)
-        if vibrance != 0:
-            # 活力：低饱和区域加得多，高饱和区域加得少
-            weight = (1 - s) ** 2
-            s = s + vibrance * 0.5 * weight
-        hsv[..., 1] = np.clip(s, 0, 1)
-        img = hsv_to_rgb_vectorized(hsv)
-        img = np.clip(img, 0, 1)
-
-    # 6. HSL 调整（按颜色区间）
-    img = apply_hsl_adjustments(img, params)
-
-    # 7. Split Toning（阴影和高光的色彩着色）
-    img = apply_split_toning(img, params)
-
-    return (img * 255).clip(0, 255).astype(np.uint8)
-
+# ─── HSV 向量化转换 ───────────────────────────────────────────────────────
 
 def rgb_to_hsv_vectorized(rgb: np.ndarray) -> np.ndarray:
-    """向量化 RGB → HSV 转换。输入 [0,1]，输出 H[0,1], S[0,1], V[0,1]"""
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     maxc = np.maximum(np.maximum(r, g), b)
     minc = np.minimum(np.minimum(r, g), b)
     v = maxc
     delta = maxc - minc
     s = np.where(maxc > 0, delta / (maxc + 1e-10), 0)
-
     rc = np.where(delta > 0, (maxc - r) / (delta + 1e-10), 0)
     gc = np.where(delta > 0, (maxc - g) / (delta + 1e-10), 0)
     bc = np.where(delta > 0, (maxc - b) / (delta + 1e-10), 0)
-
     h = np.where(r == maxc, bc - gc,
         np.where(g == maxc, 2.0 + rc - bc, 4.0 + gc - rc))
     h = (h / 6.0) % 1.0
-
     return np.stack([h, s, v], axis=-1)
 
 
 def hsv_to_rgb_vectorized(hsv: np.ndarray) -> np.ndarray:
-    """向量化 HSV → RGB 转换"""
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     i = np.floor(h * 6).astype(int)
     f = h * 6 - i
     p = v * (1 - s)
     q = v * (1 - f * s)
     t = v * (1 - (1 - f) * s)
-
     i = i % 6
-
     r = np.choose(i, [v, q, p, p, t, v])
     g = np.choose(i, [t, v, v, q, p, p])
     b = np.choose(i, [p, p, t, v, v, q])
-
     return np.stack([r, g, b], axis=-1)
 
 
-def apply_hsl_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
-    """
-    HSL 色彩调整：按颜色区间（Orange/Aqua/Green/Blue）调整 H/S/L
-    """
-    color_ranges = {
-        'Orange': (0.04, 0.11),   # 橙色: hue ≈ 0.05-0.10
-        'Green':  (0.22, 0.42),   # 绿色: hue ≈ 0.25-0.4
-        'Aqua':   (0.42, 0.55),   # 青色: hue ≈ 0.45-0.55
-        'Blue':   (0.55, 0.72),   # 蓝色: hue ≈ 0.55-0.70
-    }
+def hsv_to_single(h, s, v):
+    return np.array(colorsys.hsv_to_rgb(h % 1.0, s, v))
 
+
+def _color_mask(h: np.ndarray, color: str) -> np.ndarray:
+    """某 HSL 颜色的软掩码（高斯权重，处理 Red 跨 0 边界）"""
+    h_lo, h_hi = HSL_COLOR_HUE[color]
+    center = (h_lo + h_hi) / 2
+    sigma = max((h_hi - h_lo) / 2, 1e-3)
+    if color == 'Red':
+        d = np.minimum(np.abs(h - 0.0), np.abs(h - 1.0))
+    else:
+        d = h - center
+    return np.exp(-(d ** 2) / (2 * sigma ** 2))
+
+
+# ─── 主入口 ───────────────────────────────────────────────────────────────
+
+def apply_lr_params(img_rgb: np.ndarray, params: dict) -> np.ndarray:
+    """
+    应用 72 个 LR 参数。
+
+    Args:
+        img_rgb: (H, W, 3) RGB，uint8 [0,255] 或 float [0,1]
+        params:  参数字典（缺失的按 0 处理）
+
+    Returns:
+        (H, W, 3) uint8
+    """
+    if img_rgb.dtype == np.uint8:
+        img = img_rgb.astype(np.float32) / 255.0
+    else:
+        img = img_rgb.astype(np.float32).copy()
+
+    img = _apply_calibration(img, params)
+    img = _apply_basic_tone(img, params)
+    img = _apply_tone_curves(img, params)
+    img = _apply_local_contrast(img, params)
+    img = _apply_sat_vibrance(img, params)
+    img = _apply_hsl(img, params)
+    img = _apply_color_grading(img, params)
+
+    return (img * 255).clip(0, 255).astype(np.uint8)
+
+
+# ─── 1. 校准（RGB 原色 H/S 偏移）──────────────────────────────────────────
+
+def _apply_calibration(img: np.ndarray, p: dict) -> np.ndarray:
+    primaries = {'Red': 0.0, 'Green': 1/3, 'Blue': 2/3}
+    has = any(p.get(f'{c}Hue', 0) or p.get(f'{c}Saturation', 0) for c in primaries)
+    if not has:
+        return img
     hsv = rgb_to_hsv_vectorized(img)
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-
-    for color, (h_lo, h_hi) in color_ranges.items():
-        # 该颜色区间的软掩码（高斯权重）
-        center = (h_lo + h_hi) / 2
-        sigma = (h_hi - h_lo) / 2
-        mask = np.exp(-((h - center) ** 2) / (2 * sigma ** 2))
-
-        # 调整 H：增强 5% → 18%（更明显的色相偏移）
-        hue_shift = params.get(f'HueAdjustment{color}', 0) / 100.0 * 0.18
-        if hue_shift != 0:
+    sigma = 0.18  # 原色影响较宽
+    for c, center in primaries.items():
+        hue_shift = p.get(f'{c}Hue', 0) / 100.0 * 0.1        # ±10% 色相
+        sat_shift = p.get(f'{c}Saturation', 0) / 100.0
+        if hue_shift == 0 and sat_shift == 0:
+            continue
+        d = np.minimum(np.abs(h - center), 1.0 - np.abs(h - center))
+        mask = np.exp(-(d ** 2) / (2 * sigma ** 2))
+        if hue_shift:
             h = (h + hue_shift * mask) % 1.0
-
-        # 调整 S：增强 0.5 → 0.9（接近完全饱和度反转）
-        sat_shift = params.get(f'SaturationAdjustment{color}', 0) / 100.0
-        if sat_shift != 0:
-            s = np.clip(s + sat_shift * mask * 0.9, 0, 1)
-
-        # 调整 L（亮度）：增强 0.3 → 0.6
-        lum_shift = params.get(f'LuminanceAdjustment{color}', 0) / 100.0
-        if lum_shift != 0:
-            v = np.clip(v + lum_shift * mask * 0.6, 0, 1)
-
-    hsv = np.stack([h, s, v], axis=-1)
-    return hsv_to_rgb_vectorized(hsv)
+        if sat_shift:
+            s = np.clip(s + sat_shift * mask * 0.5, 0, 1)
+    return np.clip(hsv_to_rgb_vectorized(np.stack([h, s, v], axis=-1)), 0, 1)
 
 
-def apply_split_toning(img: np.ndarray, params: dict) -> np.ndarray:
-    """
-    Split Toning：阴影和高光区域分别添加色调。
+# ─── 2. 基础影调 ─────────────────────────────────────────────────────────
 
-    线性化版本（v3）：tint 使用饱和度=1 的纯色，混合强度 = mask * 0.3 * sat。
-    强度系数从 0.6 降到 0.3，更接近真实 LR 的 SplitToning 视觉效果。
-    与可微 PyTorch 版完全一致。
-    """
-    shadow_hue = params.get('SplitToningShadowHue', 0)
-    shadow_sat = params.get('SplitToningShadowSaturation', 0) / 100.0
-    highlight_hue = params.get('SplitToningHighlightHue', 0)
-    highlight_sat = params.get('SplitToningHighlightSaturation', 0) / 100.0
+def _apply_basic_tone(img: np.ndarray, p: dict) -> np.ndarray:
+    exp = p.get('Exposure', 0)
+    if exp:
+        img = np.clip(img * (2.0 ** exp), 0, 1)
 
-    if shadow_sat <= 0 and highlight_sat <= 0:
-        return img
+    contrast = p.get('Contrast', 0) / 100.0
+    if contrast:
+        img = np.clip(0.5 + (img - 0.5) * (1 + contrast), 0, 1)
 
-    lum = img.mean(axis=2, keepdims=True)
+    highlights = p.get('Highlights', 0) / 100.0
+    shadows    = p.get('Shadows', 0) / 100.0
+    blacks     = p.get('Blacks', 0) / 100.0
+    whites     = p.get('Whites', 0) / 100.0
+    if any([highlights, shadows, blacks, whites]):
+        lum = img.mean(axis=2, keepdims=True)
+        if highlights:
+            img = img + highlights * 0.7 * (np.clip((lum - 0.4) / 0.6, 0, 1) ** 2)
+        if shadows:
+            img = img + shadows * 0.7 * (np.clip((0.6 - lum) / 0.6, 0, 1) ** 2)
+        if blacks:
+            img = img + blacks * 0.5 * (np.clip((0.3 - lum) / 0.3, 0, 1) ** 2)
+        if whites:
+            img = img + whites * 0.5 * (np.clip((lum - 0.7) / 0.3, 0, 1) ** 2)
+        img = np.clip(img, 0, 1)
+    return img
 
-    # 阴影上色（强度 0.3，原 0.6）
-    if shadow_sat > 0:
-        sh_color = hsv_to_single(shadow_hue / 360.0, 1.0, 1.0)
-        mask = np.clip((0.5 - lum) * 2, 0, 1)
-        blend = mask[..., 0] * 0.3 * shadow_sat
-        for c in range(3):
-            img[..., c] = img[..., c] * (1 - blend) + sh_color[c] * blend
 
-    # 高光上色（强度 0.3）
-    if highlight_sat > 0:
-        hi_color = hsv_to_single(highlight_hue / 360.0, 1.0, 1.0)
-        mask = np.clip((lum - 0.5) * 2, 0, 1)
-        blend = mask[..., 0] * 0.3 * highlight_sat
-        for c in range(3):
-            img[..., c] = img[..., c] * (1 - blend) + hi_color[c] * blend
+# ─── 3. 色调曲线（Luma + RGB）────────────────────────────────────────────
 
+_CURVE_X = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+
+
+def _build_curve_lut(offsets, n=256):
+    """5 点偏移 → 256 级 LUT。offsets 单位是 0-255 空间的 y 偏移。"""
+    ctrl_y = np.clip(_CURVE_X + np.array(offsets, dtype=np.float32) / 255.0, 0, 1)
+    xs = np.linspace(0, 1, n)
+    return np.interp(xs, _CURVE_X, ctrl_y).astype(np.float32)
+
+
+def _apply_curve_channel(channel: np.ndarray, offsets) -> np.ndarray:
+    if not any(offsets):
+        return channel
+    lut = _build_curve_lut(offsets)
+    idx = np.clip((channel * 255).astype(int), 0, 255)
+    return lut[idx]
+
+
+def _apply_tone_curves(img: np.ndarray, p: dict) -> np.ndarray:
+    luma_off = [p.get(f'LumaCurve{i}', 0) for i in range(5)]
+    if any(luma_off):
+        lum = img.mean(axis=2)
+        new_lum = _apply_curve_channel(lum, luma_off)
+        ratio = (new_lum / (lum + 1e-6))[..., None]
+        img = np.clip(img * ratio, 0, 1)
+
+    for ci, cn in enumerate(['Red', 'Green', 'Blue']):
+        off = [p.get(f'{cn}Curve{i}', 0) for i in range(5)]
+        if any(off):
+            img[..., ci] = _apply_curve_channel(img[..., ci], off)
     return np.clip(img, 0, 1)
 
 
-def hsv_to_single(h, s, v):
-    """单像素 HSV → RGB"""
-    return np.array(colorsys.hsv_to_rgb(h, s, v))
+# ─── 4. 局部对比（Texture / Clarity / Dehaze）────────────────────────────
+
+def _apply_local_contrast(img: np.ndarray, p: dict) -> np.ndarray:
+    texture = p.get('Texture', 0) / 100.0
+    clarity = p.get('Clarity', 0) / 100.0
+    dehaze  = p.get('Dehaze', 0) / 100.0
+
+    lum = img.mean(axis=2)
+
+    # Texture：中频细节（小半径 unsharp）
+    if texture:
+        blur = gaussian_filter(lum, sigma=2.0)
+        detail = (lum - blur)[..., None]
+        img = np.clip(img + texture * 1.2 * detail, 0, 1)
+
+    # Clarity：中间调局部对比（大半径 unsharp，中间调加权）
+    if clarity:
+        lum2 = img.mean(axis=2)
+        blur = gaussian_filter(lum2, sigma=8.0)
+        detail = (lum2 - blur)[..., None]
+        mid_w = (1 - np.abs(lum2 - 0.5) * 2)[..., None]
+        img = np.clip(img + clarity * 1.0 * detail * mid_w, 0, 1)
+
+    # Dehaze：增对比 + 增饱和（简化全局版）
+    if dehaze:
+        img = np.clip(0.5 + (img - 0.5) * (1 + dehaze * 0.5), 0, 1)
+        hsv = rgb_to_hsv_vectorized(img)
+        hsv[..., 1] = np.clip(hsv[..., 1] * (1 + dehaze * 0.4), 0, 1)
+        img = np.clip(hsv_to_rgb_vectorized(hsv), 0, 1)
+    return img
+
+
+# ─── 5. 饱和度 / 鲜艳度 ──────────────────────────────────────────────────
+
+def _apply_sat_vibrance(img: np.ndarray, p: dict) -> np.ndarray:
+    saturation = p.get('Saturation', 0) / 100.0
+    vibrance   = p.get('Vibrance', 0) / 100.0
+    if saturation == 0 and vibrance == 0:
+        return img
+    hsv = rgb_to_hsv_vectorized(img)
+    s = hsv[..., 1]
+    if saturation:
+        s = s * (1 + saturation)
+    if vibrance:
+        s = s + vibrance * 0.5 * (1 - s) ** 2
+    hsv[..., 1] = np.clip(s, 0, 1)
+    return np.clip(hsv_to_rgb_vectorized(hsv), 0, 1)
+
+
+# ─── 6. HSL 混色器（8 色 × H/S/L）────────────────────────────────────────
+
+def _apply_hsl(img: np.ndarray, p: dict) -> np.ndarray:
+    has = any(p.get(f'{t}Adjustment{c}', 0)
+              for t in ['Hue', 'Saturation', 'Luminance'] for c in HSL_COLORS)
+    if not has:
+        return img
+    hsv = rgb_to_hsv_vectorized(img)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    for color in HSL_COLORS:
+        hue_shift = p.get(f'HueAdjustment{color}', 0) / 100.0 * 0.18
+        sat_shift = p.get(f'SaturationAdjustment{color}', 0) / 100.0
+        lum_shift = p.get(f'LuminanceAdjustment{color}', 0) / 100.0
+        if hue_shift == 0 and sat_shift == 0 and lum_shift == 0:
+            continue
+        mask = _color_mask(h, color)
+        if hue_shift:
+            h = (h + hue_shift * mask) % 1.0
+        if sat_shift:
+            s = np.clip(s + sat_shift * mask * 0.9, 0, 1)
+        if lum_shift:
+            v = np.clip(v + lum_shift * mask * 0.6, 0, 1)
+    return np.clip(hsv_to_rgb_vectorized(np.stack([h, s, v], axis=-1)), 0, 1)
+
+
+# ─── 7. 颜色分级（阴影/中间调/高光 3 区）─────────────────────────────────
+
+def _apply_color_grading(img: np.ndarray, p: dict) -> np.ndarray:
+    balance  = p.get('ColorGradeBalance', 0) / 100.0    # -1..1
+    blending = p.get('ColorGradeBlending', 50) / 100.0  # 0..1
+
+    # 任一区有 Sat>0 或 Lum≠0 才需要处理（Lum 独立于 Sat 生效）
+    active = any(
+        p.get(f'ColorGrade{z}Sat', 0) > 0 or p.get(f'ColorGrade{z}Lum', 0) != 0
+        for z in ['Shadow', 'Midtone', 'Highlight']
+    )
+    if not active:
+        return img
+
+    lum = img.mean(axis=2, keepdims=True)
+    # balance 偏移阴影/高光区间分界
+    sh_edge = 0.5 + balance * 0.2
+    hi_edge = 0.5 + balance * 0.2
+
+    for zone in ['Shadow', 'Midtone', 'Highlight']:
+        sat = p.get(f'ColorGrade{zone}Sat', 0) / 100.0
+        hue = p.get(f'ColorGrade{zone}Hue', 0)
+        lum_adj = p.get(f'ColorGrade{zone}Lum', 0) / 100.0
+        if sat <= 0 and lum_adj == 0:
+            continue
+
+        if zone == 'Shadow':
+            mask = np.clip((sh_edge - lum) / max(sh_edge, 1e-3), 0, 1)
+        elif zone == 'Highlight':
+            mask = np.clip((lum - hi_edge) / max(1 - hi_edge, 1e-3), 0, 1)
+        else:  # Midtone
+            mask = 1 - np.abs(lum - 0.5) * 2
+        mask = np.clip(mask, 0, 1) * (0.3 + 0.7 * blending)
+
+        if sat > 0:
+            tint = hsv_to_single(hue / 360.0, 1.0, 1.0)
+            # 系数 1.5：sat≤10 范围内也能产生可见 tint（sat=10 → ~15%）
+            blend = mask[..., 0] * 1.5 * sat
+            for c in range(3):
+                img[..., c] = img[..., c] * (1 - blend) + tint[c] * blend
+        if lum_adj:
+            img = img + lum_adj * 0.3 * mask
+    return np.clip(img, 0, 1)
 
 
 if __name__ == '__main__':
-    # 测试
+    import sys
     from PIL import Image
-    import os
+    img = np.array(Image.open('./data/000005_src.jpg').convert('RGB')) \
+        if __import__('os').path.exists('./data/000005_src.jpg') \
+        else np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)
 
-    # 加载测试图
-    test_path = './photos'
-    photos = [f for f in os.listdir(test_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    if not photos:
-        # 用 CR3 转出的图
-        photos = [f for f in os.listdir('./data') if f.endswith('_src.jpg')]
-        if photos:
-            img = np.array(Image.open(f'./data/{photos[0]}').convert('RGB'))
-        else:
-            print("找不到测试图")
-            exit()
-    else:
-        img = np.array(Image.open(f'{test_path}/{photos[0]}').convert('RGB'))
-
-    print(f"测试图: {photos[0]}, shape: {img.shape}")
-
-    # 应用极端参数
-    extreme_params = {
-        'Exposure': 1.5,
-        'Contrast': 50,
-        'Highlights': -80,
-        'Shadows': 60,
-        'Saturation': 50,
-        'SaturationAdjustmentOrange': 80,
+    test = {
+        'Exposure': 0.8, 'Contrast': 20, 'Highlights': -40, 'Shadows': 30,
+        'Texture': 20, 'Clarity': 15, 'Dehaze': 10, 'Vibrance': 30, 'Saturation': 15,
+        'LumaCurve2': 8, 'RedCurve4': 5,
+        'HueAdjustmentOrange': 30, 'SaturationAdjustmentBlue': -40,
+        'LuminanceAdjustmentRed': 20,
+        'ColorGradeShadowHue': 220, 'ColorGradeShadowSat': 8,
+        'ColorGradeHighlightHue': 40, 'ColorGradeHighlightSat': 6,
+        'RedHue': 20, 'BlueSaturation': 30,
     }
-
-    result = apply_lr_params(img, extreme_params)
-
-    # 计算差异
-    diff = np.abs(img.astype(np.float32) - result.astype(np.float32)).mean()
-    print(f"\n参数: {extreme_params}")
-    print(f"像素差异: {diff:.2f} / 255 = {diff/255*100:.1f}%")
-
-    # 保存对比
-    Image.fromarray(result).save('/tmp/lr_result.jpg')
-    Image.fromarray(img).save('/tmp/lr_input.jpg')
-    print(f"\n✓ 已保存:\n  原图: /tmp/lr_input.jpg\n  处理: /tmp/lr_result.jpg")
+    out = apply_lr_params(img, test)
+    diff = np.abs(img.astype(float) - out.astype(float)).mean()
+    print(f"测试渲染像素差异: {diff:.2f} / 255")
+    print(f"输出 shape: {out.shape}, dtype: {out.dtype}")

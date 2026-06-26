@@ -22,7 +22,23 @@ import numpy as np
 from modules.image_loader import load_image
 from modules.luminance_analyzer import analyze_luminance, apply_luminance_linkage
 from modules.color_analyzer import analyze_color
-from modules.xmp_generator import generate_xmp, params_summary
+from modules.xmp_generator import generate_xmp, params_summary, generate_xmp_from_cnn
+from modules.params_config import (
+    GROUP_LUMINANCE, GROUP_CURVE, GROUP_COLORGRADE, GROUP_CALIBRATION, GROUP_HSL,
+)
+
+
+def _cnn_summary(cnn_params: dict) -> dict:
+    """把 72 维 CNN 参数整理成前端展示的分组摘要（只显示非零）"""
+    def pick(keys):
+        return {k: cnn_params[k] for k in keys if cnn_params.get(k, 0) != 0}
+    return {
+        '基础调整': pick(GROUP_LUMINANCE),
+        '色调曲线': pick(GROUP_CURVE),
+        '颜色分级': pick(GROUP_COLORGRADE),
+        '相机校准': pick(GROUP_CALIBRATION),
+        'HSL 混色器': pick(GROUP_HSL),
+    }
 from modules.cnn_predictor import (
     load_predictor as load_cnn, predict_params as cnn_predict,
     is_predictor_loaded as cnn_ready,
@@ -116,7 +132,7 @@ async def health():
     return {
         "status": "ok",
         "cnn_loaded": cnn_ready(),
-        "cnn_model": "color_cnn_v5 (R²=0.73, pixel_RMSE=3.9%)" if cnn_ready() else None,
+        "cnn_model": "color_cnn_v7 (72参数, R²=0.45)" if cnn_ready() else None,
     }
 
 
@@ -141,21 +157,21 @@ async def analyze(
         # CNN 预测（双图模式）
         cnn_params = _predict_with_cnn(src_data, ref_data)
 
-        # 传统色彩/亮度分析（始终运行 — 提供 tone_curve、HSL 基础值等）
-        luminance_params = analyze_luminance(ref_data, src_data)
-        luminance_params = apply_luminance_linkage(luminance_params)
-        color_params     = analyze_color(ref_data, src_data)
-
-        # CNN 覆盖（如果可用，CNN 是 22 维参数的权威源）
         if cnn_params is not None:
-            _inject_cnn_params(luminance_params, color_params, cnn_params)
-
-        # 生成 XMP + 参数摘要
-        empty_scene = {'params': {}, 'report': {}}
-        xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
-                                    preset_name=preset_name)
-        summary     = params_summary(luminance_params, color_params, empty_scene)
-        curve_style = luminance_params.get('_curve_style', '')
+            # 双图模式：CNN 预测 72 维参数，直接生成 XMP
+            xmp_content = generate_xmp_from_cnn(cnn_params, preset_name=preset_name)
+            summary = _cnn_summary(cnn_params)
+            curve_style = ''
+        else:
+            # 单图模式：退化到传统分析
+            luminance_params = analyze_luminance(ref_data, src_data)
+            luminance_params = apply_luminance_linkage(luminance_params)
+            color_params     = analyze_color(ref_data, src_data)
+            empty_scene = {'params': {}, 'report': {}}
+            xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
+                                        preset_name=preset_name)
+            summary = params_summary(luminance_params, color_params, empty_scene)
+            curve_style = luminance_params.get('_curve_style', '')
 
         response = JSONResponse({
             "success":              True,
@@ -167,9 +183,7 @@ async def analyze(
             "curve_style":          curve_style,
             "cnn_used":             cnn_params is not None,
         })
-        # 释放大对象 + GC（内存受限部署环境）
-        del ref_data, src_data, ref_bytes, src_bytes
-        del luminance_params, color_params, cnn_params
+        del ref_data, src_data, ref_bytes, src_bytes, cnn_params
         gc.collect()
         return response
 
@@ -195,16 +209,15 @@ async def download_xmp(
 
         cnn_params = _predict_with_cnn(src_data, ref_data)
 
-        luminance_params = analyze_luminance(ref_data, src_data)
-        luminance_params = apply_luminance_linkage(luminance_params)
-        color_params     = analyze_color(ref_data, src_data)
-
         if cnn_params is not None:
-            _inject_cnn_params(luminance_params, color_params, cnn_params)
-
-        empty_scene = {'params': {}, 'report': {}}
-        xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
-                                    preset_name=preset_name)
+            xmp_content = generate_xmp_from_cnn(cnn_params, preset_name=preset_name)
+        else:
+            luminance_params = analyze_luminance(ref_data, src_data)
+            luminance_params = apply_luminance_linkage(luminance_params)
+            color_params     = analyze_color(ref_data, src_data)
+            empty_scene = {'params': {}, 'report': {}}
+            xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
+                                        preset_name=preset_name)
         safe_name   = preset_name.replace(' ', '_').replace('/', '_')
 
         return Response(

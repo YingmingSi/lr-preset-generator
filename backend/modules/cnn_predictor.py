@@ -1,10 +1,8 @@
 """
-CNN 参数预测器 — ONNX Runtime 推理版（生产部署用）
+CNN 参数预测器 — ONNX Runtime 推理（72 维 v7）
 
-用 onnxruntime 替代 PyTorch 推理：
-  - 内存占用 ~50MB（vs torch ~250MB）
-  - 推理速度相当或更快
-  - 不需要 torch 依赖
+预测 72 个 LR 参数：亮度(11) + 曲线(20) + 颜色分级(11) + 校准(6) + HSL(24)
+参数定义来自 params_config（与训练一致）。
 """
 
 import os
@@ -16,138 +14,79 @@ from typing import Dict, Optional
 
 import onnxruntime as ort
 
+from modules.params_config import PARAM_ORDER, PARAM_RANGES, FLOAT_PARAMS
 
-# 参数顺序（与训练时一致）
-PARAM_NAMES = (
-    'Exposure', 'Highlights', 'Shadows', 'Blacks', 'Whites', 'Contrast',
-    'Saturation', 'Vibrance', 'Clarity',
-    'SaturationAdjustmentOrange', 'SaturationAdjustmentAqua',
-    'SaturationAdjustmentGreen', 'SaturationAdjustmentBlue',
-    'HueAdjustmentOrange', 'HueAdjustmentGreen', 'HueAdjustmentAqua',
-    'LuminanceAdjustmentOrange', 'LuminanceAdjustmentBlue',
-    'SplitToningShadowHue', 'SplitToningShadowSaturation',
-    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
-)
-
-# 参数范围（与训练时一致）
-PARAM_RANGES = {
-    'Exposure':     (-3.0, 3.0),
-    'Highlights':   (-100, 100),
-    'Shadows':      (-100, 100),
-    'Blacks':       (-100, 100),
-    'Whites':       (-100, 100),
-    'Contrast':     (-100, 100),
-    'Saturation':   (-100, 100),
-    'Vibrance':     (-100, 100),
-    'Clarity':      (-100, 100),
-    'SaturationAdjustmentOrange': (-100, 100),
-    'SaturationAdjustmentAqua':   (-100, 100),
-    'SaturationAdjustmentGreen':  (-100, 100),
-    'SaturationAdjustmentBlue':   (-100, 100),
-    'HueAdjustmentOrange': (-100, 100),
-    'HueAdjustmentGreen':  (-100, 100),
-    'HueAdjustmentAqua':   (-100, 100),
-    'LuminanceAdjustmentOrange': (-100, 100),
-    'LuminanceAdjustmentBlue':   (-100, 100),
-    'SplitToningShadowHue':           (0, 360),
-    'SplitToningShadowSaturation':    (0, 100),
-    'SplitToningHighlightHue':        (0, 360),
-    'SplitToningHighlightSaturation': (0, 100),
+# 训练中 R²<0.1 的弱参数（信号太弱，推理时归零避免噪声）
+WEAK_PARAMS = {
+    'ColorGradeBalance', 'HueAdjustmentPurple', 'HueAdjustmentMagenta',
+    'HueAdjustmentAqua', 'HueAdjustmentGreen', 'GreenCurve0', 'RedCurve4',
 }
+
+# 颜色分级饱和度安全上限（与训练范围一致：0-10）
+CG_SAT_PARAMS = {'ColorGradeShadowSat', 'ColorGradeMidtoneSat', 'ColorGradeHighlightSat'}
 
 
 class CNNParameterPredictor:
-    """LR 参数预测器（ONNX 推理）"""
+    """LR 参数预测器（ONNX，72 维）"""
 
-    def __init__(self, model_path: Optional[str] = None, img_size: int = 384):
+    def __init__(self, model_path: Optional[str] = None, img_size: int = 256):
         self.img_size = img_size
         self.session: Optional[ort.InferenceSession] = None
         self.is_loaded = False
-
         if model_path:
             self.load_model(model_path)
 
     def load_model(self, model_path: str):
-        """加载 ONNX 模型"""
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"模型文件不存在: {model_path}")
-
-        # 单线程 CPU 推理（避免内存峰值）
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
         self.session = ort.InferenceSession(
-            model_path,
-            sess_options=opts,
-            providers=['CPUExecutionProvider'],
-        )
+            model_path, sess_options=opts, providers=['CPUExecutionProvider'])
         self.is_loaded = True
-        print(f"✓ ONNX CNN 模型已加载: {model_path}")
+        print(f"✓ ONNX CNN 模型已加载（72 维）: {model_path}")
 
     def _preprocess(self, img: np.ndarray) -> np.ndarray:
-        """RGB → (1, 3, H, W) float32 [0, 1]"""
         if img.dtype == np.uint8:
             img = img.astype(np.float32) / 255.0
         elif img.max() > 1.5:
             img = img.astype(np.float32) / 255.0
         else:
             img = img.astype(np.float32)
-
-        # Resize 到训练尺寸
         if img.shape[0] != self.img_size or img.shape[1] != self.img_size:
             pil = Image.fromarray((img * 255).clip(0, 255).astype(np.uint8))
             pil = pil.resize((self.img_size, self.img_size), Image.BILINEAR)
             img = np.array(pil).astype(np.float32) / 255.0
-
-        # (H, W, 3) → (1, 3, H, W)
         return np.transpose(img, (2, 0, 1))[np.newaxis, ...]
 
-    def _denormalize(self, normalized: np.ndarray) -> dict:
-        """从 [-1, 1] 反归一化到原始参数范围"""
+    def _denormalize(self, norm: np.ndarray) -> dict:
         out = {}
-        for i, name in enumerate(PARAM_NAMES):
+        for i, name in enumerate(PARAM_ORDER):
             lo, hi = PARAM_RANGES[name]
             mid = (lo + hi) / 2
             span = (hi - lo) / 2
-            val = float(normalized[i]) * span + mid
-
-            if name == 'Exposure':
-                out[name] = round(val, 2)
-            else:
-                out[name] = int(round(val))
+            val = float(norm[i]) * span + mid
+            out[name] = round(val, 2) if name in FLOAT_PARAMS else int(round(val))
         return out
 
     def predict(self, src_rgb: np.ndarray, ref_rgb: np.ndarray) -> Dict[str, float]:
-        """预测 LR 参数"""
         if not self.is_loaded:
             raise RuntimeError("模型未加载")
-
         src_arr = self._preprocess(src_rgb)
         ref_arr = self._preprocess(ref_rgb)
-
-        # ONNX 推理
-        pred = self.session.run(
-            None,
-            {'src': src_arr, 'ref': ref_arr},
-        )[0]  # (1, 22)
-
-        normalized = pred[0]
-        params = self._denormalize(normalized)
-
-        # 释放中间数组
+        pred = self.session.run(None, {'src': src_arr, 'ref': ref_arr})[0]
+        params = self._denormalize(pred[0])
         del src_arr, ref_arr, pred
         gc.collect()
 
-        # 安全约束（SplitToning sat ≤ 5：分布外场景下 SplitToning 容易被滥用，
-        # 视觉效果比真实 LR 强烈，hard clamp 为保险）
-        params['SplitToningShadowSaturation'] = max(0, min(
-            params['SplitToningShadowSaturation'], 5
-        ))
-        params['SplitToningHighlightSaturation'] = max(0, min(
-            params['SplitToningHighlightSaturation'], 5
-        ))
+        # 弱参数归零
+        for k in WEAK_PARAMS:
+            params[k] = 0
+        # 颜色分级饱和度上限
+        for k in CG_SAT_PARAMS:
+            params[k] = max(0, min(params[k], 10))
         return params
 
 
@@ -157,17 +96,13 @@ _predictor: Optional[CNNParameterPredictor] = None
 
 
 def load_predictor(model_path: Optional[str] = None) -> Optional[CNNParameterPredictor]:
-    """加载全局 CNN 预测器（应用启动时调用一次）"""
     global _predictor
-
     if model_path is None:
         backend_dir = Path(__file__).resolve().parent.parent
         model_path = str(backend_dir / 'models' / 'param_predictor.onnx')
-
     if not os.path.exists(model_path):
         print(f"⚠ ONNX 模型不存在: {model_path}")
         return None
-
     _predictor = CNNParameterPredictor(model_path=model_path)
     return _predictor
 
@@ -183,19 +118,10 @@ def is_predictor_loaded() -> bool:
 
 
 if __name__ == '__main__':
-    import sys
-    if len(sys.argv) > 1:
-        model_path = sys.argv[1]
-    else:
-        backend_dir = Path(__file__).resolve().parent.parent
-        model_path = str(backend_dir / 'models' / 'param_predictor.onnx')
-
-    predictor = CNNParameterPredictor(model_path)
-    np.random.seed(42)
-    src = np.random.randint(0, 256, (384, 384, 3), dtype=np.uint8)
-    ref = np.random.randint(0, 256, (384, 384, 3), dtype=np.uint8)
-
-    params = predictor.predict(src, ref)
-    print("\n预测参数:")
-    for name, val in params.items():
-        print(f"  {name:<40}: {val}")
+    backend_dir = Path(__file__).resolve().parent.parent
+    p = CNNParameterPredictor(str(backend_dir / 'models' / 'param_predictor.onnx'))
+    np.random.seed(0)
+    src = np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)
+    ref = np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)
+    out = p.predict(src, ref)
+    print(f"预测 {len(out)} 参数，非零: {sum(1 for v in out.values() if v != 0)}")
