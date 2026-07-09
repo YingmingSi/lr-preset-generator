@@ -114,14 +114,14 @@ def _align_src_to_ref(src_data, ref_data):
     return src_data
 
 
-def _predict_with_cnn(src_data, ref_data):
+def _predict_with_cnn(src_data, ref_data, boldness: float = 1.0):
     """运行 CNN 推理；失败时返回 None"""
     if src_data is None or not cnn_ready():
         return None
     try:
         src_rgb = (src_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
         ref_rgb = (ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
-        return cnn_predict(src_rgb, ref_rgb)
+        return cnn_predict(src_rgb, ref_rgb, boldness=boldness)
     except Exception as e:
         print(f"⚠ CNN 预测失败: {e}")
         return None
@@ -141,12 +141,15 @@ async def analyze(
     ref_image:    UploadFile = File(...),
     src_image:    UploadFile = File(None),
     preset_name:  str = Form("AI生成预设"),
+    boldness:     float = Form(1.0),
 ):
     ref_bytes = await ref_image.read()
     src_bytes = await src_image.read() if src_image else None
 
     if not ref_bytes:
         raise HTTPException(400, "参考图不能为空")
+
+    boldness = max(0.5, min(2.0, boldness))  # 安全区间
 
     try:
         ref_data = load_image(ref_bytes, ref_image.filename or "ref.jpg")
@@ -155,7 +158,7 @@ async def analyze(
         mode     = "B_dual" if src_data else "A_single"
 
         # CNN 预测（双图模式）
-        cnn_params = _predict_with_cnn(src_data, ref_data)
+        cnn_params = _predict_with_cnn(src_data, ref_data, boldness=boldness)
 
         if cnn_params is not None:
             # 双图模式：CNN 预测 72 维参数，直接生成 XMP
@@ -198,16 +201,18 @@ async def download_xmp(
     ref_image:    UploadFile = File(...),
     src_image:    UploadFile = File(None),
     preset_name:  str = Form("AI生成预设"),
+    boldness:     float = Form(1.0),
 ):
     ref_bytes = await ref_image.read()
     src_bytes = await src_image.read() if src_image else None
+    boldness = max(0.5, min(2.0, boldness))
 
     try:
         ref_data = load_image(ref_bytes, ref_image.filename or "ref.jpg")
         src_data = load_image(src_bytes, src_image.filename or "src.jpg") if src_bytes else None
         src_data = _align_src_to_ref(src_data, ref_data)
 
-        cnn_params = _predict_with_cnn(src_data, ref_data)
+        cnn_params = _predict_with_cnn(src_data, ref_data, boldness=boldness)
 
         if cnn_params is not None:
             xmp_content = generate_xmp_from_cnn(cnn_params, preset_name=preset_name)
