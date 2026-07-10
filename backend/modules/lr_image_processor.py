@@ -18,7 +18,7 @@ import numpy as np
 import colorsys
 from scipy.ndimage import gaussian_filter
 
-from params_config import HSL_COLORS, HSL_COLOR_HUE
+from modules.params_config import HSL_COLORS, HSL_COLOR_HUE
 
 
 # ─── HSV 向量化转换 ───────────────────────────────────────────────────────

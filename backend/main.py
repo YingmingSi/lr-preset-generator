@@ -23,6 +23,7 @@ from modules.image_loader import load_image
 from modules.luminance_analyzer import analyze_luminance, apply_luminance_linkage
 from modules.color_analyzer import analyze_color
 from modules.xmp_generator import generate_xmp, params_summary, generate_xmp_from_cnn
+from modules.lut_generator import bake_cube_lut
 from modules.params_config import (
     GROUP_LUMINANCE, GROUP_CURVE, GROUP_COLORGRADE, GROUP_CALIBRATION, GROUP_HSL,
 )
@@ -161,29 +162,29 @@ async def analyze(
         cnn_params = _predict_with_cnn(src_data, ref_data, boldness=boldness)
 
         if cnn_params is not None:
-            # 双图模式：CNN 预测 72 维参数，直接生成 XMP
-            xmp_content = generate_xmp_from_cnn(cnn_params, preset_name=preset_name)
+            # 双图模式：CNN 预测 72 维参数 → 烘焙成 3D LUT
+            lut_content = bake_cube_lut(cnn_params, size=33, title=preset_name)
+            xmp_content = generate_xmp_from_cnn(cnn_params, preset_name=preset_name)  # 仍提供 XMP 备选
             summary = _cnn_summary(cnn_params)
-            curve_style = ''
         else:
-            # 单图模式：退化到传统分析
+            # 单图模式：退化到传统分析（仅 XMP）
             luminance_params = analyze_luminance(ref_data, src_data)
             luminance_params = apply_luminance_linkage(luminance_params)
             color_params     = analyze_color(ref_data, src_data)
             empty_scene = {'params': {}, 'report': {}}
             xmp_content = generate_xmp(luminance_params, color_params, empty_scene,
                                         preset_name=preset_name)
+            lut_content = None
             summary = params_summary(luminance_params, color_params, empty_scene)
-            curve_style = luminance_params.get('_curve_style', '')
 
         response = JSONResponse({
             "success":              True,
             "mode":                 mode,
             "summary":              summary,
+            "lut_content":          lut_content,
             "xmp_content":          xmp_content,
             "compression_detected": ref_data.get('compression_suspected', False),
             "is_raw_source":        src_data.get('is_raw', False) if src_data else False,
-            "curve_style":          curve_style,
             "cnn_used":             cnn_params is not None,
         })
         del ref_data, src_data, ref_bytes, src_bytes, cnn_params

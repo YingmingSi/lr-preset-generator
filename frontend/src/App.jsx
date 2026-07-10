@@ -75,16 +75,18 @@ export default function App() {
     }
   };
 
-  const downloadXmp = () => {
-    if (!result?.xmp_content) return;
-    const blob = new Blob([result.xmp_content], { type: "application/xml" });
+  const download = (content, ext, mime) => {
+    if (!content) return;
+    const blob = new Blob([content], { type: mime });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;
-    a.download = `${presetName}.xmp`;
+    a.download = `${presetName}.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
   };
+  const downloadLut = () => download(result?.lut_content, "cube", "text/plain");
+  const downloadXmp = () => download(result?.xmp_content, "xmp", "application/xml");
 
   return (
     <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "'Georgia','Times New Roman',serif" }}>
@@ -213,14 +215,24 @@ export default function App() {
                   {{ report: "分析报告", params: "参数详情", xmp: "XMP预览" }[tab]}
                 </button>
               ))}
-              <div style={{ marginLeft: "auto", paddingBottom: "4px" }}>
+              <div style={{ marginLeft: "auto", paddingBottom: "4px", display: "flex", gap: "8px" }}>
+                {result.lut_content && (
+                  <button onClick={downloadLut} style={{
+                    background: COLORS.accent, border: `1px solid ${COLORS.accent}`,
+                    color: "#000", padding: "6px 20px",
+                    fontSize: "11px", letterSpacing: "0.1em",
+                    fontFamily: "monospace", cursor: "pointer",
+                  }}>
+                    ↓ 下载 .cube LUT
+                  </button>
+                )}
                 <button onClick={downloadXmp} style={{
-                  background: "none", border: `1px solid ${COLORS.accent}`,
-                  color: COLORS.accent, padding: "6px 20px",
+                  background: "none", border: `1px solid ${COLORS.accentDim}`,
+                  color: COLORS.accentDim, padding: "6px 16px",
                   fontSize: "11px", letterSpacing: "0.1em",
                   fontFamily: "monospace", cursor: "pointer",
                 }}>
-                  ↓ 下载 .xmp
+                  ↓ .xmp
                 </button>
               </div>
             </div>
