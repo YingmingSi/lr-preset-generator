@@ -32,8 +32,8 @@ def export_model(pt_path: str, onnx_path: str):
     model.eval()
 
     # 创建 dummy 输入（batch=1, 384x384 RGB）
-    dummy_src = torch.rand(1, 3, 256, 256)
-    dummy_ref = torch.rand(1, 3, 256, 256)
+    dummy_src = torch.rand(1, 3, 384, 384)
+    dummy_ref = torch.rand(1, 3, 384, 384)
 
     print(f"导出 ONNX: {onnx_path}")
     torch.onnx.export(
@@ -74,8 +74,8 @@ def export_model(pt_path: str, onnx_path: str):
     sess = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
 
     # 用真实数据测试
-    test_src = torch.rand(1, 3, 256, 256)
-    test_ref = torch.rand(1, 3, 256, 256)
+    test_src = torch.rand(1, 3, 384, 384)
+    test_ref = torch.rand(1, 3, 384, 384)
 
     with torch.no_grad():
         pt_out = model(test_src, test_ref).numpy()

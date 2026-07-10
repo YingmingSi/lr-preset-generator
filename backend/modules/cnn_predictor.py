@@ -38,7 +38,7 @@ BOLDNESS_PARAMS = set(
 class CNNParameterPredictor:
     """LR 参数预测器（ONNX，72 维）"""
 
-    def __init__(self, model_path: Optional[str] = None, img_size: int = 256):
+    def __init__(self, model_path: Optional[str] = None, img_size: int = 384):
         self.img_size = img_size
         self.session: Optional[ort.InferenceSession] = None
         self.is_loaded = False
