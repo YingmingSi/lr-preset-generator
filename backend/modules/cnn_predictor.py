@@ -25,15 +25,6 @@ WEAK_PARAMS = {
 # 颜色分级饱和度安全上限（与训练范围一致：0-10）
 CG_SAT_PARAMS = {'ColorGradeShadowSat', 'ColorGradeMidtoneSat', 'ColorGradeHighlightSat'}
 
-# boldness 滑块放大的参数：仅饱和度/强度类，不含色相（色相方向保持不变）
-from modules.params_config import HSL_COLORS as _HC
-BOLDNESS_PARAMS = set(
-    [f'SaturationAdjustment{c}' for c in _HC] +   # HSL 饱和度
-    [f'LuminanceAdjustment{c}' for c in _HC] +    # HSL 明度
-    [f'ColorGrade{z}Sat' for z in ['Shadow', 'Midtone', 'Highlight']] +  # 颜色分级饱和度
-    ['Saturation', 'Vibrance']                    # 全局饱和度/鲜艳度
-)
-
 
 class CNNParameterPredictor:
     """LR 参数预测器（ONNX，72 维）"""
@@ -80,13 +71,7 @@ class CNNParameterPredictor:
             out[name] = round(val, 2) if name in FLOAT_PARAMS else int(round(val))
         return out
 
-    def predict(self, src_rgb: np.ndarray, ref_rgb: np.ndarray,
-                boldness: float = 1.0) -> Dict[str, float]:
-        """
-        Args:
-            boldness: 色彩强度倍数（仅放大饱和度/强度类，不动色相）。
-                      1.0=模型原始输出，>1 更浓，<1 更淡。建议 0.8-1.6。
-        """
+    def predict(self, src_rgb: np.ndarray, ref_rgb: np.ndarray) -> Dict[str, float]:
         if not self.is_loaded:
             raise RuntimeError("模型未加载")
         src_arr = self._preprocess(src_rgb)
@@ -99,14 +84,7 @@ class CNNParameterPredictor:
         # 弱参数归零
         for k in WEAK_PARAMS:
             params[k] = 0
-
-        # 色彩强度倍数（仅饱和度/强度，色相不变）
-        if boldness != 1.0:
-            for k in BOLDNESS_PARAMS:
-                lo, hi = PARAM_RANGES[k]
-                params[k] = int(round(max(lo, min(hi, params[k] * boldness))))
-
-        # 颜色分级饱和度上限（放大后再夹）
+        # 颜色分级饱和度上限
         for k in CG_SAT_PARAMS:
             params[k] = max(0, min(params[k], 10))
         return params
@@ -129,11 +107,10 @@ def load_predictor(model_path: Optional[str] = None) -> Optional[CNNParameterPre
     return _predictor
 
 
-def predict_params(src_rgb: np.ndarray, ref_rgb: np.ndarray,
-                   boldness: float = 1.0) -> Optional[Dict[str, float]]:
+def predict_params(src_rgb: np.ndarray, ref_rgb: np.ndarray) -> Optional[Dict[str, float]]:
     if _predictor is None:
         return None
-    return _predictor.predict(src_rgb, ref_rgb, boldness=boldness)
+    return _predictor.predict(src_rgb, ref_rgb)
 
 
 def is_predictor_loaded() -> bool:

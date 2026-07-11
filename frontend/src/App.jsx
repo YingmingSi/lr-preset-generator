@@ -65,7 +65,6 @@ export default function App() {
   const [refPreview,  setRefPreview]  = useState(null);
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI生成预设");
-  const [boldness,    setBoldness]    = useState(1.0);
   const [strength,    setStrength]    = useState(1.0);  // 风格应用强度（LUT 不透明度）
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
@@ -148,7 +147,6 @@ export default function App() {
     form.append("ref_image",    refFile);
     if (srcFile) form.append("src_image", srcFile);
     form.append("preset_name",  presetName);
-    form.append("boldness",     String(boldness));
 
     try {
       const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: form });
@@ -236,7 +234,7 @@ export default function App() {
           </div>
 
           {/* Options row */}
-          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.3fr auto", gap: "16px", alignItems: "center", marginBottom: "10px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "16px", alignItems: "center", marginBottom: "10px" }}>
             <div>
               <FieldLabel>预设名称</FieldLabel>
               <input
@@ -248,20 +246,6 @@ export default function App() {
                   color: COLORS.text, padding: "8px 12px",
                   fontSize: "12px", fontFamily: "monospace", outline: "none",
                 }}
-              />
-            </div>
-
-            {/* 色彩强度滑块（只影响饱和度/强度，不改色相方向）*/}
-            <div>
-              <FieldLabel>
-                色彩强度 · {boldness.toFixed(1)}×
-                {boldness < 1 ? "（淡雅）" : boldness > 1.1 ? "（浓郁）" : "（原始）"}
-              </FieldLabel>
-              <input
-                type="range" min="0.8" max="1.6" step="0.1"
-                value={boldness}
-                onChange={e => setBoldness(parseFloat(e.target.value))}
-                style={{ width: "100%", accentColor: COLORS.accent, cursor: "pointer", marginTop: "6px" }}
               />
             </div>
 
