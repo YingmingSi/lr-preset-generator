@@ -1,6 +1,48 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+// ─── 客户端 3D LUT 引擎（实时预览）──────────────────────────────────────
+function parseCube(text) {
+  let size = 0;
+  const data = [];
+  for (const ln of text.split("\n")) {
+    const t = ln.trim();
+    if (t.startsWith("LUT_3D_SIZE")) size = parseInt(t.split(/\s+/)[1]);
+    else if (/^[0-9.]/.test(t)) {
+      const p = t.split(/\s+/).map(Number);
+      if (p.length === 3) data.push(p);
+    }
+  }
+  return { size, data };
+}
+
+// 对 ImageData 应用 LUT（trilinear），返回新的 Float32 结果（[0,1] RGB）
+function applyLutToImage(imgData, lut) {
+  const { size: N, data } = lut;
+  const px = imgData.data;
+  const n = imgData.width * imgData.height;
+  const out = new Float32Array(n * 3);
+  const idx = (r, g, b) => r + g * N + b * N * N;
+  for (let i = 0; i < n; i++) {
+    const R = px[i * 4] / 255, G = px[i * 4 + 1] / 255, B = px[i * 4 + 2] / 255;
+    const rf = R * (N - 1), gf = G * (N - 1), bf = B * (N - 1);
+    const r0 = Math.floor(rf), g0 = Math.floor(gf), b0 = Math.floor(bf);
+    const r1 = Math.min(r0 + 1, N - 1), g1 = Math.min(g0 + 1, N - 1), b1 = Math.min(b0 + 1, N - 1);
+    const dr = rf - r0, dg = gf - g0, db = bf - b0;
+    for (let ax = 0; ax < 3; ax++) {
+      const c000 = data[idx(r0, g0, b0)][ax], c100 = data[idx(r1, g0, b0)][ax];
+      const c010 = data[idx(r0, g1, b0)][ax], c110 = data[idx(r1, g1, b0)][ax];
+      const c001 = data[idx(r0, g0, b1)][ax], c101 = data[idx(r1, g0, b1)][ax];
+      const c011 = data[idx(r0, g1, b1)][ax], c111 = data[idx(r1, g1, b1)][ax];
+      const c00 = c000 * (1 - dr) + c100 * dr, c10 = c010 * (1 - dr) + c110 * dr;
+      const c01 = c001 * (1 - dr) + c101 * dr, c11 = c011 * (1 - dr) + c111 * dr;
+      const c0 = c00 * (1 - dg) + c10 * dg, c1 = c01 * (1 - dg) + c11 * dg;
+      out[i * 3 + ax] = c0 * (1 - db) + c1 * db;
+    }
+  }
+  return out;
+}
 
 const COLORS = {
   bg:          "#0a0a0a",
@@ -24,6 +66,7 @@ export default function App() {
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI生成预设");
   const [boldness,    setBoldness]    = useState(1.0);
+  const [strength,    setStrength]    = useState(1.0);  // 风格应用强度（LUT 不透明度）
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -31,6 +74,54 @@ export default function App() {
 
   const refInputRef = useRef();
   const srcInputRef = useRef();
+  const previewCanvas = useRef();
+  // 预计算缓冲：原图像素 + LUT 全量结果（strength 滑块只做混合，实时）
+  const bufs = useRef(null);   // { w, h, orig: Float32, lut: Float32 }
+
+  // 结果就绪时：加载原图 → 预计算 orig + LUT 全量结果
+  useEffect(() => {
+    if (!result?.lut_content || !srcPreview) { bufs.current = null; return; }
+    const img = new Image();
+    img.onload = () => {
+      const maxW = 420;
+      const scale = Math.min(1, maxW / img.width);
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const cv = document.createElement("canvas");
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext("2d");
+      ctx.drawImage(img, 0, 0, w, h);
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const orig = new Float32Array(w * h * 3);
+      for (let i = 0; i < w * h; i++) {
+        orig[i * 3] = imgData.data[i * 4] / 255;
+        orig[i * 3 + 1] = imgData.data[i * 4 + 1] / 255;
+        orig[i * 3 + 2] = imgData.data[i * 4 + 2] / 255;
+      }
+      const lut = applyLutToImage(imgData, parseCube(result.lut_content));
+      bufs.current = { w, h, orig, lut };
+      renderPreview(strength);
+    };
+    img.src = srcPreview;
+  }, [result, srcPreview]);
+
+  // strength 变化时实时混合渲染
+  useEffect(() => { renderPreview(strength); }, [strength]);
+
+  const renderPreview = (s) => {
+    const b = bufs.current, cv = previewCanvas.current;
+    if (!b || !cv) return;
+    cv.width = b.w; cv.height = b.h;
+    const ctx = cv.getContext("2d");
+    const out = ctx.createImageData(b.w, b.h);
+    for (let i = 0; i < b.w * b.h; i++) {
+      for (let ax = 0; ax < 3; ax++) {
+        const v = b.orig[i * 3 + ax] * (1 - s) + b.lut[i * 3 + ax] * s;
+        out.data[i * 4 + ax] = Math.max(0, Math.min(255, v * 255));
+      }
+      out.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
+  };
 
   const handleFile = useCallback((file, type) => {
     if (!file) return;
@@ -85,7 +176,26 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
-  const downloadLut = () => download(result?.lut_content, "cube", "text/plain");
+  // 把风格强度烘焙进 .cube（LUT 向 identity 混合）
+  const lutWithStrength = () => {
+    if (!result?.lut_content) return null;
+    if (strength === 1.0) return result.lut_content;
+    const { size: N, data } = parseCube(result.lut_content);
+    const header = result.lut_content.split("\n").filter(l => !/^[0-9.]/.test(l.trim()) || l.trim() === "");
+    const lines = [];
+    for (const l of result.lut_content.split("\n")) {
+      if (/^[0-9.]/.test(l.trim())) break;
+      lines.push(l);
+    }
+    for (let i = 0; i < data.length; i++) {
+      const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
+      const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
+      const v = data[i].map((x, k) => Math.max(0, Math.min(1, id[k] * (1 - strength) + x * strength)));
+      lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
+    }
+    return lines.join("\n") + "\n";
+  };
+  const downloadLut = () => download(lutWithStrength(), "cube", "text/plain");
   const downloadXmp = () => download(result?.xmp_content, "xmp", "application/xml");
 
   return (
@@ -177,7 +287,7 @@ export default function App() {
           {/* Mode indicator */}
           {(refFile || srcFile) && (
             <div style={{ fontSize: "11px", color: COLORS.textMuted, fontFamily: "monospace", letterSpacing: "0.06em" }}>
-              {srcFile ? "● 双图模式 — CNN 参数预测（R² 0.73）" : "● 单图模式 — 风格特征提取"}
+              {srcFile ? "● 双图模式 — CNN 风格移植 · 实时 LUT 预览" : "● 单图模式 — 风格特征提取"}
             </div>
           )}
         </section>
@@ -202,6 +312,39 @@ export default function App() {
         {/* Results */}
         {result && !loading && (
           <section>
+            {/* 实时效果预览（双图 LUT 模式）*/}
+            {result.lut_content && srcPreview && (
+              <div style={{ marginBottom: "28px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "20px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: "12px", alignItems: "start" }}>
+                  <div>
+                    <FieldLabel>原图</FieldLabel>
+                    <img src={srcPreview} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.border}` }} />
+                  </div>
+                  <div>
+                    <FieldLabel>参考风格</FieldLabel>
+                    <img src={refPreview} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.border}` }} />
+                  </div>
+                  <div>
+                    <FieldLabel>应用效果（实时）· 强度 {Math.round(strength * 100)}%</FieldLabel>
+                    <canvas ref={previewCanvas} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.accent}`, display: "block" }} />
+                  </div>
+                </div>
+                {/* 风格强度滑块 */}
+                <div style={{ marginTop: "16px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontFamily: "monospace", color: COLORS.textDim, marginBottom: "4px" }}>
+                    <span>风格应用强度</span>
+                    <span style={{ color: COLORS.accent }}>{Math.round(strength * 100)}%</span>
+                  </div>
+                  <input type="range" min="0" max="1.5" step="0.05" value={strength}
+                    onChange={e => setStrength(parseFloat(e.target.value))}
+                    style={{ width: "100%", accentColor: COLORS.accent, cursor: "pointer" }} />
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "9px", fontFamily: "monospace", color: COLORS.textMuted, marginTop: "2px" }}>
+                    <span>0% 原图</span><span>100% 标准</span><span>150% 加强</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Tabs */}
             <div style={{ display: "flex", borderBottom: `1px solid ${COLORS.border}`, marginBottom: "28px" }}>
               {["report", "params", "xmp"].map(tab => (
