@@ -72,16 +72,21 @@ class Trainer:
         )
 
     def set_stage(self, mask, pixel_w: float):
-        """设置课程阶段：参数掩码 + 像素 loss 权重"""
+        """设置课程阶段：参数掩码 + 像素 loss 权重 + 每参数权重"""
         self.param_mask = torch.tensor(mask, device=self.device, dtype=torch.float32)
         self.pixel_w = pixel_w
+        # 每参数 loss 权重：亮度 1.0，其余创作类（曲线/颜色分级/校准/HSL）1.6
+        from params_config import PARAM_ORDER, GROUP_LUMINANCE
+        w = [1.0 if p in GROUP_LUMINANCE else 1.6 for p in PARAM_ORDER]
+        self.param_weight = torch.tensor(w, device=self.device, dtype=torch.float32)
 
     def _masked_param_loss(self, pred, target):
-        """只在激活参数上计算 MSE"""
+        """只在激活参数上计算 MSE（带每参数权重）"""
         if not hasattr(self, 'param_mask'):
             return self.criterion(pred, target)
-        se = (pred - target) ** 2 * self.param_mask
-        return se.sum() / (self.param_mask.sum() * pred.shape[0] + 1e-8)
+        w = self.param_mask * getattr(self, 'param_weight', 1.0)
+        se = (pred - target) ** 2 * w
+        return se.sum() / (w.sum() * pred.shape[0] + 1e-8)
 
     def train_epoch(self, train_loader) -> dict:
         """训练一个 epoch，返回各损失分量"""

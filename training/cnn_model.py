@@ -71,77 +71,82 @@ class ConvBlock(nn.Module):
 
 class ParamPredictor(nn.Module):
     """
-    色彩映射 CNN
+    色彩映射 CNN v8 — 空间感知 + 差异输入
 
-    输入: src (B, 3, H, W), ref (B, 3, H, W) 已经归一化到 [0, 1]
-    输出: (B, 72) 参数预测（Tanh 限制到 [-1, 1]）
+    改进（针对"颜色调整保守"）:
+      1. 差异输入：显式 ref-src（局部变化检测）
+      2. 空间注意力池化：保留"颜色在哪、变多少"的位置信息
+      3. 多尺度：融合 stage3(细) + stage4(粗) 特征
+      4. 线性输出（去 Tanh）：减少向 0 收缩，敢于输出大值
 
-    架构:
-      1. 把 src 和 ref 都计算 RGB+HSV (6 通道每张)
-      2. 在通道维度堆叠: 12 通道
-      3. 简单 CNN 提取空间特征 (384→12)
-      4. 全局池化 + MLP → 72
+    输入: src (B,3,H,W), ref (B,3,H,W) ∈ [0,1]
+    输出: (B, 72)
     """
 
     def __init__(self, backbone: str = 'simple_color', pretrained: bool = False):
         super().__init__()
 
-        # 输入 12 通道：src(RGB+HSV) + ref(RGB+HSV)
+        # 输入 15 通道：src(RGB+HSV 6) + ref(RGB+HSV 6) + diff(RGB 3)
         self.stem = nn.Sequential(
-            nn.Conv2d(12, 64, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.Conv2d(15, 64, kernel_size=5, stride=2, padding=2, bias=False),
             nn.BatchNorm2d(64),
             nn.GELU(),
-        )  # 384 → 192
+        )
+        self.stage1 = ConvBlock(64, 96, pool=True)
+        self.stage2 = ConvBlock(96, 128, pool=True)
+        self.stage3 = ConvBlock(128, 192, pool=True)   # 多尺度：细
+        self.stage4 = ConvBlock(192, 256, pool=True)   # 粗
 
-        # 主干（5 个 stage）
-        self.stage1 = ConvBlock(64, 96, pool=True)    # 192 → 96
-        self.stage2 = ConvBlock(96, 128, pool=True)   # 96 → 48
-        self.stage3 = ConvBlock(128, 192, pool=True)  # 48 → 24
-        self.stage4 = ConvBlock(192, 256, pool=True)  # 24 → 12
-        # 不再 pool，保留 12×12 空间特征
-
-        # 全局池化 + 全局统计
-        # 全局: avg, max, std → 3 × 256 = 768
-        self.head = nn.Sequential(
-            nn.Linear(256 * 3, 512),
+        # 空间注意力：学习"关注哪些区域"（捕捉局部色彩变化）
+        self.attn = nn.Sequential(
+            nn.Conv2d(256, 64, kernel_size=1),
             nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 256),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, N_PARAMS),
-            nn.Tanh(),  # 限制到 [-1, 1] 匹配归一化目标
+            nn.Conv2d(64, 1, kernel_size=1),
         )
 
-    def _prepare_input(self, src: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-        """拼接 src(RGB+HSV) + ref(RGB+HSV) = 12 通道"""
-        src_hsv = rgb_to_hsv(src)  # (B, 3, H, W)
+        # 特征维度: stage4 avg+max+std+attn (4×256) + stage3 avg+std (2×192) = 1408
+        feat_dim = 256 * 4 + 192 * 2
+        self.head = nn.Sequential(
+            nn.Linear(feat_dim, 768),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(768, 384),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(384, N_PARAMS),
+            nn.Tanh(),  # 恢复 Tanh：训练稳定（去 Tanh 会震荡）。"敢调色"靠强采样数据
+        )
+
+    def _prepare_input(self, src, ref):
+        src_hsv = rgb_to_hsv(src)
         ref_hsv = rgb_to_hsv(ref)
-        # 12 通道: [src_R, src_G, src_B, src_H, src_S, src_V,
-        #          ref_R, ref_G, ref_B, ref_H, ref_S, ref_V]
-        return torch.cat([src, src_hsv, ref, ref_hsv], dim=1)
+        diff = ref - src   # 显式差异
+        return torch.cat([src, src_hsv, ref, ref_hsv, diff], dim=1)  # 15 ch
 
-    def forward(self, src: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-        # 准备 12 通道输入
-        x = self._prepare_input(src, ref)  # (B, 12, H, W)
+    def forward(self, src, ref):
+        x = self._prepare_input(src, ref)
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        s3 = self.stage3(x)    # (B, 192, H/16, W/16)
+        s4 = self.stage4(s3)   # (B, 256, H/32, W/32)
 
-        # CNN 主干
-        x = self.stem(x)        # (B, 64, 192, 192)
-        x = self.stage1(x)      # (B, 96, 96, 96)
-        x = self.stage2(x)      # (B, 128, 48, 48)
-        x = self.stage3(x)      # (B, 192, 24, 24)
-        x = self.stage4(x)      # (B, 256, 12, 12)
+        # stage4 全局统计
+        avg = s4.mean(dim=[2, 3])
+        mx, _ = s4.flatten(2).max(dim=2)
+        std = s4.flatten(2).std(dim=2)
 
-        # 全局统计
-        avg_pool = x.mean(dim=[2, 3])  # (B, 256)
-        max_pool, _ = x.flatten(2).max(dim=2)  # (B, 256)
-        std_pool = x.flatten(2).std(dim=2)  # (B, 256)
+        # 空间注意力池化
+        a = self.attn(s4)                          # (B,1,h,w)
+        a = torch.softmax(a.flatten(2), dim=2)     # (B,1,hw)
+        attn_pool = (s4.flatten(2) * a).sum(dim=2) # (B,256)
 
-        global_feat = torch.cat([avg_pool, max_pool, std_pool], dim=1)  # (B, 768)
+        # stage3 多尺度统计
+        s3_avg = s3.mean(dim=[2, 3])
+        s3_std = s3.flatten(2).std(dim=2)
 
-        # 回归头
-        params = self.head(global_feat)  # (B, 72)
-        return params
+        feat = torch.cat([avg, mx, std, attn_pool, s3_avg, s3_std], dim=1)
+        return self.head(feat)
 
 
 def count_parameters(model: nn.Module) -> int:

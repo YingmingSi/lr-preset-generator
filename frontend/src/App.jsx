@@ -64,7 +64,7 @@ export default function App() {
   const [srcFile,     setSrcFile]     = useState(null);
   const [refPreview,  setRefPreview]  = useState(null);
   const [srcPreview,  setSrcPreview]  = useState(null);
-  const [presetName,  setPresetName]  = useState("AI生成预设");
+  const [presetName,  setPresetName]  = useState("AI Style");
   const [strength,    setStrength]    = useState(1.0);  // 风格应用强度（LUT 不透明度）
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
@@ -138,14 +138,14 @@ export default function App() {
   }, [handleFile]);
 
   const analyze = async () => {
-    if (!refFile) return;
+    if (!refFile || !srcFile) return;
     setLoading(true);
     setError(null);
     setResult(null);
 
     const form = new FormData();
+    form.append("src_image",    srcFile);
     form.append("ref_image",    refFile);
-    if (srcFile) form.append("src_image", srcFile);
     form.append("preset_name",  presetName);
 
     try {
@@ -194,7 +194,6 @@ export default function App() {
     return lines.join("\n") + "\n";
   };
   const downloadLut = () => download(lutWithStrength(), "cube", "text/plain");
-  const downloadXmp = () => download(result?.xmp_content, "xmp", "application/xml");
 
   return (
     <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "'Georgia','Times New Roman',serif" }}>
@@ -202,10 +201,10 @@ export default function App() {
       {/* Header */}
       <header style={{ borderBottom: `1px solid ${COLORS.border}`, padding: "28px 48px", display: "flex", alignItems: "baseline", gap: "16px" }}>
         <h1 style={{ margin: 0, fontSize: "22px", fontWeight: "400", letterSpacing: "0.12em", color: COLORS.accent, fontFamily: "'Georgia',serif" }}>
-          LR · 预设生成器
+          风格移植 · LUT 生成器
         </h1>
         <span style={{ color: COLORS.textMuted, fontSize: "12px", letterSpacing: "0.08em", fontFamily: "monospace" }}>
-          CNN 驱动 · 22 维参数预测 · R² 0.73
+          原图 + 风格参考 → 通用 3D LUT (.cube)
         </span>
       </header>
 
@@ -223,7 +222,7 @@ export default function App() {
               style={{ display: "none" }}
               onChange={e => handleFile(e.target.files[0], "ref")} />
 
-            <DropZone label="原图" sublabel="可选 · 支持RAW格式"
+            <DropZone label="原图" sublabel="必须 · 你要调色的照片" accent
               preview={srcPreview}
               onDrop={e => onDrop(e, "src")}
               onClick={() => srcInputRef.current?.click()} />
@@ -252,18 +251,18 @@ export default function App() {
             <div style={{ paddingTop: "18px" }}>
               <button
                 onClick={analyze}
-                disabled={!refFile || loading}
+                disabled={!refFile || !srcFile || loading}
                 style={{
-                  background: refFile && !loading ? COLORS.accent : COLORS.border,
-                  color:      refFile && !loading ? "#000" : COLORS.textMuted,
+                  background: refFile && srcFile && !loading ? COLORS.accent : COLORS.border,
+                  color:      refFile && srcFile && !loading ? "#000" : COLORS.textMuted,
                   border: "none", padding: "8px 28px",
                   fontSize: "12px", letterSpacing: "0.12em",
                   fontFamily: "'Georgia',serif",
-                  cursor: refFile && !loading ? "pointer" : "not-allowed",
+                  cursor: refFile && srcFile && !loading ? "pointer" : "not-allowed",
                   whiteSpace: "nowrap",
                 }}
               >
-                {loading ? "分析中..." : "生成预设"}
+                {loading ? "生成中..." : "生成 LUT"}
               </button>
             </div>
           </div>
@@ -271,7 +270,7 @@ export default function App() {
           {/* Mode indicator */}
           {(refFile || srcFile) && (
             <div style={{ fontSize: "11px", color: COLORS.textMuted, fontFamily: "monospace", letterSpacing: "0.06em" }}>
-              {srcFile ? "● 双图模式 — CNN 风格移植 · 实时 LUT 预览" : "● 单图模式 — 风格特征提取"}
+              {srcFile && refFile ? "● 就绪 — 点击生成，实时预览 + 下载 LUT" : "● 请上传原图 + 风格参考图"}
             </div>
           )}
         </section>
@@ -331,7 +330,7 @@ export default function App() {
 
             {/* Tabs */}
             <div style={{ display: "flex", borderBottom: `1px solid ${COLORS.border}`, marginBottom: "28px" }}>
-              {["report", "params", "xmp"].map(tab => (
+              {["report", "params"].map(tab => (
                 <button key={tab} onClick={() => setActiveTab(tab)} style={{
                   background: "none", border: "none",
                   borderBottom: activeTab === tab ? `1px solid ${COLORS.accent}` : "1px solid transparent",
@@ -339,34 +338,23 @@ export default function App() {
                   padding: "10px 24px", fontSize: "11px", letterSpacing: "0.12em",
                   fontFamily: "monospace", cursor: "pointer", marginBottom: "-1px",
                 }}>
-                  {{ report: "分析报告", params: "参数详情", xmp: "XMP预览" }[tab]}
+                  {{ report: "分析报告", params: "参数详情" }[tab]}
                 </button>
               ))}
-              <div style={{ marginLeft: "auto", paddingBottom: "4px", display: "flex", gap: "8px" }}>
-                {result.lut_content && (
-                  <button onClick={downloadLut} style={{
-                    background: COLORS.accent, border: `1px solid ${COLORS.accent}`,
-                    color: "#000", padding: "6px 20px",
-                    fontSize: "11px", letterSpacing: "0.1em",
-                    fontFamily: "monospace", cursor: "pointer",
-                  }}>
-                    ↓ 下载 .cube LUT
-                  </button>
-                )}
-                <button onClick={downloadXmp} style={{
-                  background: "none", border: `1px solid ${COLORS.accentDim}`,
-                  color: COLORS.accentDim, padding: "6px 16px",
+              <div style={{ marginLeft: "auto", paddingBottom: "4px" }}>
+                <button onClick={downloadLut} style={{
+                  background: COLORS.accent, border: `1px solid ${COLORS.accent}`,
+                  color: "#000", padding: "6px 24px",
                   fontSize: "11px", letterSpacing: "0.1em",
                   fontFamily: "monospace", cursor: "pointer",
                 }}>
-                  ↓ .xmp
+                  ↓ 下载 .cube LUT
                 </button>
               </div>
             </div>
 
             {activeTab === "report" && <ReportTab result={result} />}
             {activeTab === "params" && <ParamsTab summary={result.summary} />}
-            {activeTab === "xmp"    && <XmpTab xmp={result.xmp_content} />}
           </section>
         )}
       </main>
@@ -422,14 +410,17 @@ function FieldLabel({ children }) {
 }
 
 function ReportTab({ result }) {
+  const groups = Object.entries(result.summary || {}).filter(([, v]) => Object.keys(v).length);
   return (
     <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
-      <Label>分析摘要</Label>
-      <Row label="分析模式"  value={result.mode === "B_dual" ? "双图 CNN 预测" : "单图特征提取"} />
-      {result.cnn_used         && <Row label="CNN 参数"  value="已应用（R² 0.73）" good />}
-      {result.compression_detected && <Row label="图片质量" value="检测到压缩，已补偿" warn />}
-      {result.is_raw_source          && <Row label="原图格式" value="RAW（高精度）" good />}
-      {result.curve_style && <Row label="曲线风格" value={result.curve_style} />}
+      <Label>风格摘要 · CNN 预测的颜色变换</Label>
+      <div style={{ marginTop: "10px" }}>
+        {groups.length === 0
+          ? <div style={{ fontSize: "12px", color: COLORS.textMuted, fontFamily: "monospace" }}>接近原图（变化很小）</div>
+          : groups.map(([name, params]) => (
+              <Row key={name} label={name} value={`${Object.keys(params).length} 项调整`} />
+            ))}
+      </div>
     </div>
   );
 }
@@ -457,37 +448,6 @@ function ParamsTab({ summary }) {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-function XmpTab({ xmp }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    navigator.clipboard.writeText(xmp);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-  return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "8px" }}>
-        <button onClick={copy} style={{
-          background: "none", border: `1px solid ${COLORS.border}`,
-          color: COLORS.textMuted, padding: "5px 14px",
-          fontSize: "10px", fontFamily: "monospace", cursor: "pointer", letterSpacing: "0.06em",
-        }}>
-          {copied ? "已复制" : "复制"}
-        </button>
-      </div>
-      <pre style={{
-        background: COLORS.surface, border: `1px solid ${COLORS.border}`,
-        padding: "20px", fontSize: "10px", fontFamily: "monospace",
-        color: "#888", overflowX: "auto", overflowY: "auto",
-        maxHeight: "500px", lineHeight: "1.6", margin: 0,
-        whiteSpace: "pre-wrap", wordBreak: "break-all",
-      }}>
-        {xmp}
-      </pre>
     </div>
   );
 }

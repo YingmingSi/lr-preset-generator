@@ -20,7 +20,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from lr_image_processor import apply_lr_params
-from params_config import PARAM_ORDER, PARAM_RANGES, FLOAT_PARAMS
+from params_config import PARAM_ORDER, PARAM_RANGES, FLOAT_PARAMS, HSL_COLORS
 
 OUTPUT_PARAMS = PARAM_ORDER  # 72 维
 
@@ -75,11 +75,27 @@ def generate_single_variant(param: str) -> dict:
     return params
 
 
+# 色彩类参数（这些倾向用强采样，避免模型学得保守）
+_COLOR_PARAMS = set(
+    [f'{t}Adjustment{c}' for t in ['Hue', 'Saturation', 'Luminance']
+     for c in HSL_COLORS] +
+    [f'ColorGrade{z}{a}' for z in ['Shadow', 'Midtone', 'Highlight']
+     for a in ['Hue', 'Sat', 'Lum']] +
+    ['Saturation', 'Vibrance']
+)
+
+
 def generate_combination_variant() -> dict:
-    """组合变体：随机 2-6 个参数同时改变"""
+    """
+    组合变体：随机 2-6 个参数同时改变。
+    色彩类参数 70% 用强采样（抬高条件均值，让模型敢调色）。
+    """
     params = {p: 0 for p in OUTPUT_PARAMS}
     for param in random.sample(OUTPUT_PARAMS, random.randint(2, 6)):
-        params[param] = sample_random_value(param)
+        if param in _COLOR_PARAMS and random.random() < 0.7:
+            params[param] = sample_strong_value(param)
+        else:
+            params[param] = sample_random_value(param)
     return params
 
 
