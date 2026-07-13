@@ -1,0 +1,16 @@
+## Render.com 部署配置（免费层，替代 Railway）
+## 用法：
+##   1. render.com 注册 → New → Blueprint → 连接此 GitHub 仓库
+##   2. Render 自动读取本文件，用 Dockerfile 构建后端
+##   3. 部署后拿到 URL，填到 Vercel 前端的 VITE_API_URL 环境变量
+## 注意：免费层闲置 15 分钟后休眠，下次访问冷启动 ~30-50s（属正常）
+services:
+  - type: web
+    name: lr-style-lut-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
