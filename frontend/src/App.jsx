@@ -137,6 +137,9 @@ export default function App() {
     if (file) handleFile(file, type);
   }, [handleFile]);
 
+  // 打开页面即预热后端（Render 免费层休眠后需 ~40s 唤醒）
+  useEffect(() => { fetch(`${API_BASE}/health`).catch(() => {}); }, []);
+
   const analyze = async () => {
     if (!refFile || !srcFile) return;
     setLoading(true);
@@ -148,20 +151,30 @@ export default function App() {
     form.append("ref_image",    refFile);
     form.append("preset_name",  presetName);
 
-    try {
+    // 冷启动可能失败/超时，自动重试（每次间隔递增，覆盖 ~40s 唤醒窗口）
+    const submit = async () => {
       const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: form });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "分析失败");
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`);
+      return res.json();
+    };
+    const delays = [0, 5000, 8000, 12000];
+    let lastErr;
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i]) {
+        setError(`后端启动中，请稍候…（${i}/3 重试）`);
+        await new Promise(r => setTimeout(r, delays[i]));
       }
-      const data = await res.json();
-      setResult(data);
-      setActiveTab("report");
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
+      try {
+        const data = await submit();
+        setResult(data);
+        setActiveTab("report");
+        setError(null);
+        setLoading(false);
+        return;
+      } catch (e) { lastErr = e; }
     }
+    setError(`生成失败：${lastErr?.message || "网络错误"}（若后端刚唤醒，请再点一次）`);
+    setLoading(false);
   };
 
   const download = (content, ext, mime) => {

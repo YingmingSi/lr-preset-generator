@@ -58,10 +58,9 @@ def _load_raw(file_bytes: bytes, filename: str) -> dict:
             )
         # 转换为8bit
         rgb8 = (rgb16 / 256).astype(np.uint8)
+        # 先降采样再转 float，避免全分辨率 float 占满内存（免费层 512MB）
+        rgb8 = _resize8(rgb8)
         rgb_float = rgb8.astype(np.float32) / 255.0
-
-        # 缩放到合理尺寸
-        rgb8, rgb_float = _resize(rgb8, rgb_float)
 
         return {
             'rgb_uint8': rgb8,
@@ -92,10 +91,9 @@ def _load_standard(file_bytes: bytes) -> dict:
     if compression_suspected:
         rgb8 = _compensate_compression(rgb8)
 
+    # 先降采样再转 float，避免全分辨率 float 占满内存（免费层 512MB）
+    rgb8 = _resize8(rgb8)
     rgb_float = rgb8.astype(np.float32) / 255.0
-
-    # 缩放
-    rgb8, rgb_float = _resize(rgb8, rgb_float)
 
     return {
         'rgb_uint8': rgb8,
@@ -165,18 +163,12 @@ def _compensate_compression(rgb8: np.ndarray) -> np.ndarray:
     return np.array(img)
 
 
-def _resize(rgb8: np.ndarray, rgb_float: np.ndarray, max_size: int = 2000):
-    """缩放到最大边不超过max_size，保持宽高比"""
+def _resize8(rgb8: np.ndarray, max_size: int = 512):
+    """缩放 uint8 图像，最大边不超过 max_size，保持宽高比。
+    本应用只把图喂给 384px CNN（LUT 烘焙不用图），512 足够且省内存。"""
     h, w = rgb8.shape[:2]
     if max(h, w) <= max_size:
-        return rgb8, rgb_float
-
+        return rgb8
     scale = max_size / max(h, w)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-
-    img = Image.fromarray(rgb8).resize((new_w, new_h), Image.LANCZOS)
-    rgb8_resized = np.array(img)
-    rgb_float_resized = rgb8_resized.astype(np.float32) / 255.0
-
-    return rgb8_resized, rgb_float_resized
+    img = Image.fromarray(rgb8).resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    return np.array(img)
