@@ -143,14 +143,18 @@ def apply_lr_params_torch(src, params_norm):
     mids, spans = _range_tensors(src.device, src.dtype)
     params = params_norm * spans + mids   # (B, 72) 原始范围
 
+    _zero = torch.zeros(params.shape[0], device=params.device, dtype=params.dtype)
+
     def P(name):
-        return params[:, _IDX[name]]
+        # 缺失参数（61 维裁剪掉的）返回 0，与 numpy 处理器 .get(key,0) 一致
+        i = _IDX.get(name)
+        return params[:, i] if i is not None else _zero
 
     img = src.clamp(0, 1)
 
     img = _calibration(img, P)
     img = _basic_tone(img, P)
-    img = _tone_curves(img, params)
+    img = _tone_curves(img, P)
     img = _local_contrast(img, P)
     img = _sat_vibrance(img, P)
     img = _hsl(img, P)
@@ -194,15 +198,16 @@ def _basic_tone(img, P):
     return img.clamp(0, 1)
 
 
-def _tone_curves(img, params):
-    luma_off = torch.stack([params[:, _IDX[f'LumaCurve{i}']] for i in range(5)], dim=1)
+def _tone_curves(img, P):
+    # 缺失曲线点（RGB 首尾锚点已裁剪）经 P 返回 0，等价固定为 identity 锚点
+    luma_off = torch.stack([P(f'LumaCurve{i}') for i in range(5)], dim=1)
     lum = img.mean(dim=1, keepdim=True)
     new_lum = _apply_curve(lum, luma_off)
     ratio = new_lum / (lum + 1e-6)
     img = (img * ratio).clamp(0, 1)
 
     for ci, cn in enumerate(['Red', 'Green', 'Blue']):
-        off = torch.stack([params[:, _IDX[f'{cn}Curve{i}']] for i in range(5)], dim=1)
+        off = torch.stack([P(f'{cn}Curve{i}') for i in range(5)], dim=1)
         ch = _apply_curve(img[:, ci:ci+1], off)
         img = torch.cat([img[:, :ci], ch, img[:, ci+1:]], dim=1)
     return img.clamp(0, 1)
