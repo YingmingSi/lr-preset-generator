@@ -82,7 +82,7 @@ export default function App() {
     if (!result?.lut_content || !srcPreview) { bufs.current = null; return; }
     const img = new Image();
     img.onload = () => {
-      const maxW = 420;
+      const maxW = 1000;  // 预览分辨率（仅屏显；下载的 LUT 分辨率无关，套用时全分辨率）
       const scale = Math.min(1, maxW / img.width);
       const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
       const cv = document.createElement("canvas");
