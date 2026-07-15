@@ -1,12 +1,15 @@
 """
-训练数据生成 v7 — 72 维参数，纯 Python 处理器
+训练数据生成 v9 — 61 维参数，稠密拟真预设，纯 Python 处理器
 
 参数定义统一来自 params_config.py（单一数据源）。
 
 变体策略（每张照片 N 个，默认 50）：
-  - 单变量变体：只改 1 个参数（学习孤立的因果关系）
-    72 个参数按照片索引轮转，确保整个数据集每个参数都有充分的孤立样本
-  - 组合变体：随机 2-6 个参数（学习参数交互）
+  - 少量单变量（默认 8）：学习孤立因果，参数按索引轮转覆盖全部 61 个
+  - 主力"预设式"稠密变体：按相关模块（基础影调/曲线/HSL/颜色分级/校准）
+    协同激活 8-20 个参数，模拟真实预设。色彩类强采样，抬高条件均值 → 模型敢调色。
+
+动机：旧数据 71% 只调 1 个参数、平均 1.93 个非零 → MSE 回归 0 → 保守。
+稠密组合直接提升每个参数的激活频率与幅度，从数据层面消灭保守。
 """
 
 import os
@@ -85,18 +88,104 @@ _COLOR_PARAMS = set(
 )
 
 
-def generate_combination_variant() -> dict:
+def _scaled(param: str, frac_lo: float, frac_hi: float) -> float:
+    """按范围幅度的 [frac_lo, frac_hi] 采样（对称区间随机符号）"""
+    lo, hi = PARAM_RANGES[param]
+    if lo < 0 < hi:
+        sign = random.choice([-1, 1])
+        hi_mag = hi if sign > 0 else abs(lo)
+        return _quantize(sign * hi_mag * random.uniform(frac_lo, frac_hi), param)
+    return _quantize(lo + (hi - lo) * random.uniform(frac_lo, frac_hi), param)
+
+
+# ─── 预设"模块"：每个模块协同激活一组相关参数（模拟真实调色手法）────────────
+
+def _mod_basic_tone(p):
+    p['Exposure'] = _scaled('Exposure', 0.15, 0.6)
+    p['Contrast'] = _scaled('Contrast', 0.3, 0.9)
+    for k in random.sample(['Highlights', 'Shadows', 'Blacks', 'Whites'], random.randint(2, 4)):
+        p[k] = _scaled(k, 0.25, 0.8)
+
+def _mod_luma_curve(p):
+    style = random.choice(['s_curve', 'fade', 'lift'])
+    if style == 's_curve':              # 压阴影抬高光 → 增对比
+        u = random.uniform(4, 9)
+        p['LumaCurve1'] = -round(u); p['LumaCurve3'] = round(u)
+    elif style == 'fade':               # 抬黑 + 压白 → 灰调胶片感
+        p['LumaCurve0'] = round(random.uniform(3, 9))
+        p['LumaCurve4'] = -round(random.uniform(2, 7))
+    else:                               # 整体提亮中间调
+        p['LumaCurve2'] = round(random.uniform(3, 9))
+
+def _clip_curve(v):
+    return int(max(-10, min(10, round(v))))
+
+def _mod_rgb_curve(p):
+    # 分通道曲线色偏：随机 1-2 个通道，阴影点(1)与高光点(3)反向做分离色调；
+    # 偶尔动中间点(2)。覆盖 R/G/B 全通道，避免 Green/中点被饿死。
+    for cn in random.sample(['Red', 'Green', 'Blue'], random.randint(1, 2)):
+        s = random.choice([-1, 1])
+        if random.random() < 0.85:
+            p[f'{cn}Curve1'] = _clip_curve(s * random.uniform(3, 8))
+            p[f'{cn}Curve3'] = _clip_curve(-s * random.uniform(2, 6))
+        if random.random() < 0.45:
+            p[f'{cn}Curve2'] = _clip_curve(random.choice([-1, 1]) * random.uniform(2, 6))
+
+def _mod_hsl(p):
+    for c in random.sample(HSL_COLORS, random.randint(3, 6)):
+        p[f'SaturationAdjustment{c}'] = _scaled(f'SaturationAdjustment{c}', 0.3, 0.9)
+        if random.random() < 0.7:
+            p[f'HueAdjustment{c}'] = _scaled(f'HueAdjustment{c}', 0.2, 0.7)
+        if random.random() < 0.6:
+            p[f'LuminanceAdjustment{c}'] = _scaled(f'LuminanceAdjustment{c}', 0.2, 0.7)
+
+def _mod_color_grade(p):
+    # 分区上色（青橙 / 分离色调）；处理器要求 Sat>0 才生效
+    zones = random.sample(['Shadow', 'Midtone', 'Highlight'], random.randint(1, 3))
+    for z in zones:
+        p[f'ColorGrade{z}Hue'] = int(random.uniform(0, 360))
+        p[f'ColorGrade{z}Sat'] = int(random.uniform(4, 10))
+        if random.random() < 0.4:
+            p[f'ColorGrade{z}Lum'] = _scaled(f'ColorGrade{z}Lum', 0.15, 0.5)
+
+def _mod_calibration(p):
+    for c in random.sample(['Red', 'Green', 'Blue'], random.randint(2, 3)):
+        p[f'{c}Hue'] = _scaled(f'{c}Hue', 0.2, 0.7)
+        p[f'{c}Saturation'] = _scaled(f'{c}Saturation', 0.2, 0.7)
+
+def _mod_global_sat(p):
+    if random.random() < 0.5:
+        p['Saturation'] = _scaled('Saturation', 0.2, 0.7)
+    if random.random() < 0.6:
+        p['Vibrance'] = _scaled('Vibrance', 0.25, 0.8)
+
+# (模块, 触发概率)
+_MODULES = [
+    (_mod_basic_tone,  0.80),
+    (_mod_luma_curve,  0.55),
+    (_mod_rgb_curve,   0.35),
+    (_mod_hsl,         0.78),
+    (_mod_color_grade, 0.60),
+    (_mod_calibration, 0.40),
+    (_mod_global_sat,  0.50),
+]
+
+
+def generate_preset_variant() -> dict:
     """
-    组合变体：随机 2-6 个参数同时改变。
-    色彩类参数 70% 用强采样（抬高条件均值，让模型敢调色）。
+    预设式稠密变体：按模块协同激活 ~8-20 个相关参数，模拟真实调色。
+    保证至少 2 个模块触发，避免过稀疏。
     """
     params = {p: 0 for p in OUTPUT_PARAMS}
-    for param in random.sample(OUTPUT_PARAMS, random.randint(2, 6)):
-        if param in _COLOR_PARAMS and random.random() < 0.7:
-            params[param] = sample_strong_value(param)
-        else:
-            params[param] = sample_random_value(param)
-    return params
+    fired = 0
+    while fired < 2:                       # 至少 2 个模块，确保稠密
+        fired = 0
+        for mod, prob in _MODULES:
+            if random.random() < prob:
+                mod(params)
+                fired += 1
+    # 清理不在 61 维内的键（保险）
+    return {k: v for k, v in params.items() if k in OUTPUT_PARAMS}
 
 
 def generate_variants_for_photo(photo_idx: int, n_variants: int,
@@ -117,8 +206,8 @@ def generate_variants_for_photo(photo_idx: int, n_variants: int,
         })
     for _ in range(n_variants - n_single):
         variants.append({
-            'type': 'combo', 'active_param': None,
-            'params': generate_combination_variant(),
+            'type': 'preset', 'active_param': None,
+            'params': generate_preset_variant(),
         })
     return variants
 
@@ -167,8 +256,8 @@ def render_one_pair(src_path: str, params: dict, variant_meta: dict,
 
 def generate(src_dir: str, out_dir: str,
              variants_per_photo: int = 50,
-             n_single: int = 35,
-             img_size: int = 256,
+             n_single: int = 8,
+             img_size: int = 384,
              n_workers: int = 8):
     """
     主生成函数。
@@ -226,8 +315,8 @@ if __name__ == '__main__':
     parser.add_argument('--src-dir', required=True)
     parser.add_argument('--out-dir', required=True)
     parser.add_argument('--variants-per-photo', type=int, default=50)
-    parser.add_argument('--n-single', type=int, default=35)
-    parser.add_argument('--img-size', type=int, default=256)
+    parser.add_argument('--n-single', type=int, default=8)
+    parser.add_argument('--img-size', type=int, default=384)
     parser.add_argument('--n-workers', type=int, default=8)
     args = parser.parse_args()
 

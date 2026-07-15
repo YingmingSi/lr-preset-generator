@@ -212,11 +212,31 @@ class Trainer:
         logger.info(f"模型已保存到 {path}")
 
     def load_checkpoint(self, path: str):
-        """加载模型检查点"""
+        """加载模型检查点（完整恢复：权重 + 优化器）"""
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         return checkpoint.get('epoch', 0)
+
+    def warm_start(self, path: str):
+        """
+        暖启动：只加载能对上的权重（backbone 复用），跳过形状不匹配的层（输出头重置）。
+        不加载优化器状态 —— 分布已变，用全新 AdamW + 全新 LR 调度。
+        """
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        state = ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt
+        model_sd = self.model.state_dict()
+        loaded, skipped = [], []
+        for k, v in state.items():
+            if k in model_sd and model_sd[k].shape == v.shape:
+                model_sd[k] = v
+                loaded.append(k)
+            else:
+                skipped.append(k)
+        self.model.load_state_dict(model_sd)
+        logger.info(f"🔥 暖启动：复用 {len(loaded)} 层，重置 {len(skipped)} 层")
+        if skipped:
+            logger.info(f"   重置（形状变化/新层）: {skipped}")
 
 
 def main():
@@ -244,7 +264,9 @@ def main():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='计算设备 (cuda/cpu)')
     parser.add_argument('--resume', type=str, default=None,
-                        help='恢复训练的检查点路径')
+                        help='完整恢复训练（权重+优化器）的检查点路径')
+    parser.add_argument('--warm-start', type=str, default=None,
+                        help='暖启动：只载能对上的权重（复用 backbone、重置输出头），用全新优化器')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
     parser.add_argument('--pixel-loss-weight', type=float, default=0.3,
@@ -302,10 +324,13 @@ def main():
     writer = SummaryWriter(log_dir)
     logger.info(f"日志保存到: {log_dir}")
 
-    # 恢复训练（如果指定）
+    # 恢复训练 / 暖启动（如果指定）
     if args.resume:
-        logger.info(f"从检查点恢复: {args.resume}")
+        logger.info(f"从检查点完整恢复: {args.resume}")
         trainer.load_checkpoint(args.resume)
+    elif args.warm_start:
+        logger.info(f"暖启动（复用 backbone）: {args.warm_start}")
+        trainer.warm_start(args.warm_start)
 
     # ─── 课程学习 / 联合训练 ─────────────────────────────────────────────
     from params_config import CURRICULUM_STAGES as _STAGES, stage_mask as _smask, PARAM_ORDER

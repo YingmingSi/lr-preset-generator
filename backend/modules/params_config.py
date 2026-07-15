@@ -4,12 +4,14 @@
 所有模块（生成器、归一化器、模型、后端）都从这里导入参数定义，
 避免 72 维参数在多个文件中各自维护导致不一致。
 
-72 维参数分为 5 组（与课程学习阶段对应）：
-  S1 亮度     (11): Exposure ... Saturation
-  S2 色调曲线 (20): Luma/Red/Green/Blue × 5 点
-  S3 颜色分级 (11): 阴影/中间调/高光 × H/S/L + Balance + Blending
+61 维参数分为 5 组（仅保留对 3D LUT 有实测效果的参数）：
+  S1 亮度      (8): Exposure ... Saturation（去 Texture/Clarity/Dehaze — 空间操作，LUT 不表达）
+  S2 色调曲线 (14): Luma 5 点 + Red/Green/Blue 各中间 3 点（去 RGB 曲线首尾锚点 — LUT 无效果）
+  S3 颜色分级  (9): 阴影/中间调/高光 × H/S/L（去 Balance/Blending — LUT 无效果）
   S4 校准      (6): 红/绿/蓝原色 × 色相/饱和度
   S5 HSL      (24): 色相/饱和度/明度 × 8 色
+
+注：72→61 的裁剪依据是"逐参数烘焙 LUT 的实测偏移"，被删的 11 个偏移≈0。
 """
 
 # ─── 8 个 LR HSL 颜色 ─────────────────────────────────────────────────────
@@ -32,22 +34,21 @@ HSL_COLOR_HUE = {
 
 GROUP_LUMINANCE = [
     'Exposure', 'Contrast', 'Highlights', 'Shadows', 'Blacks', 'Whites',
-    'Texture', 'Clarity', 'Dehaze', 'Vibrance', 'Saturation',
-]
+    'Vibrance', 'Saturation',
+]  # 去 Texture/Clarity/Dehaze（空间操作，LUT 不表达）
 
 GROUP_CURVE = (
-    [f'LumaCurve{i}'  for i in range(5)] +
-    [f'RedCurve{i}'   for i in range(5)] +
-    [f'GreenCurve{i}' for i in range(5)] +
-    [f'BlueCurve{i}'  for i in range(5)]
+    [f'LumaCurve{i}'  for i in range(5)] +          # Luma 保留 5 点
+    [f'RedCurve{i}'   for i in range(1, 4)] +       # RGB 各留中间 3 点（去首尾锚点）
+    [f'GreenCurve{i}' for i in range(1, 4)] +
+    [f'BlueCurve{i}'  for i in range(1, 4)]
 )
 
 GROUP_COLORGRADE = [
     'ColorGradeShadowHue',    'ColorGradeShadowSat',    'ColorGradeShadowLum',
     'ColorGradeMidtoneHue',   'ColorGradeMidtoneSat',   'ColorGradeMidtoneLum',
     'ColorGradeHighlightHue', 'ColorGradeHighlightSat', 'ColorGradeHighlightLum',
-    'ColorGradeBalance', 'ColorGradeBlending',
-]
+]  # 去 Balance/Blending（LUT 烘焙无效果）
 
 GROUP_CALIBRATION = [
     'RedHue', 'RedSaturation',
@@ -70,7 +71,7 @@ PARAM_ORDER = (
     GROUP_HSL            # 48-71  (24)
 )
 
-assert len(PARAM_ORDER) == 72, f"参数数应为 72，实际 {len(PARAM_ORDER)}"
+assert len(PARAM_ORDER) == 61, f"参数数应为 61，实际 {len(PARAM_ORDER)}"
 
 # ─── 课程学习阶段（累积索引）─────────────────────────────────────────────
 # 每个 stage 训练时，loss 只在累积到该 stage 的参数上计算
@@ -79,7 +80,7 @@ CURRICULUM_STAGES = [
     ('S2_curve',       GROUP_LUMINANCE + GROUP_CURVE),
     ('S3_colorgrade',  GROUP_LUMINANCE + GROUP_CURVE + GROUP_COLORGRADE),
     ('S4_calibration', GROUP_LUMINANCE + GROUP_CURVE + GROUP_COLORGRADE + GROUP_CALIBRATION),
-    ('S5_hsl',         PARAM_ORDER),  # 全部 72
+    ('S5_hsl',         PARAM_ORDER),  # 全部 61
 ]
 
 

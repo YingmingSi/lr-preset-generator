@@ -1,8 +1,8 @@
 """
-CNN 参数预测器 — ONNX Runtime 推理（72 维 v7）
+CNN 参数预测器 — ONNX Runtime 推理（61 维 v9）
 
-预测 72 个 LR 参数：亮度(11) + 曲线(20) + 颜色分级(11) + 校准(6) + HSL(24)
-参数定义来自 params_config（与训练一致）。
+预测 61 个 LR 参数：亮度(8) + 曲线(14) + 颜色分级(9) + 校准(6) + HSL(24)
+仅保留对 3D LUT 有实测效果的参数。参数定义来自 params_config（与训练一致）。
 """
 
 import os
@@ -16,11 +16,9 @@ import onnxruntime as ort
 
 from modules.params_config import PARAM_ORDER, PARAM_RANGES, FLOAT_PARAMS
 
-# 训练中 R²<0.1 的弱参数（信号太弱，推理时归零避免噪声）
-WEAK_PARAMS = {
-    'ColorGradeBalance', 'HueAdjustmentPurple', 'HueAdjustmentMagenta',
-    'HueAdjustmentAqua', 'HueAdjustmentGreen', 'GreenCurve0', 'RedCurve4',
-}
+# 弱参数归零集合。v9 用稠密数据重训、意在让色相类也学起来，故暂清空。
+# 训练完按新 R² 重新评估，若仍有 R²≈0 的参数再加回这里。
+WEAK_PARAMS = set()
 
 # 颜色分级饱和度安全上限（与训练范围一致：0-10）
 CG_SAT_PARAMS = {'ColorGradeShadowSat', 'ColorGradeMidtoneSat', 'ColorGradeHighlightSat'}
