@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import numpy as np
 
 from modules.image_loader import load_image
-from modules.color_match import bake_match_lut
+from modules.lut_generator import bake_cube_lut
+from modules.color_match import compute_match_stats
 from modules.params_config import (
     GROUP_LUMINANCE, GROUP_CURVE, GROUP_COLORGRADE, GROUP_CALIBRATION, GROUP_HSL,
 )
@@ -98,13 +99,15 @@ async def analyze(
         ref_rgb = (ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
         params = cnn_predict(src_rgb, ref_rgb)
 
-        # 解析匹配（src→ref 影调+色彩）⊕ CNN 风格，混合烘焙成 LUT
-        lut_content = bake_match_lut(src_rgb, ref_rgb, params, size=33, title=preset_name)
+        # CNN 风格 LUT（纯参数）+ 解析匹配统计量；混合由前端实时完成（两个滑块）
+        lut_style   = bake_cube_lut(params, size=33, title=preset_name)
+        match_stats = compute_match_stats(src_rgb, ref_rgb)
 
         response = JSONResponse({
             "success":     True,
             "summary":     _summary(params),
-            "lut_content": lut_content,
+            "lut_style":   lut_style,      # CNN-only LUT（identity 网格烘焙）
+            "match_stats": match_stats,    # 解析匹配统计量（前端 LAB 变换用）
         })
         del src_data, ref_data, src_bytes, ref_bytes, params
         gc.collect()

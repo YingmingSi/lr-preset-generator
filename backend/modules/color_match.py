@@ -71,32 +71,46 @@ def _to01(img):
     return img.astype(np.float64) / 255.0 if img.dtype == np.uint8 or img.max() > 1.5 else img.astype(np.float64)
 
 
+def compute_match_stats(src_rgb, ref_rgb) -> dict:
+    """
+    从 src/ref 解析 LAB 匹配所需的统计量（JSON 可序列化，供前端实时变换用）。
+
+    返回:
+      src_Lq/ref_Lq: L 通道 256 分位点（影调匹配的映射表）
+      src_ab_mean/ref_ab_mean: a/b 均值
+      ab_scale: a/b 方差比（已裁剪 [0.5,2]）
+    """
+    src_lab = rgb_to_lab(_to01(src_rgb)).reshape(-1, 3)
+    ref_lab = rgb_to_lab(_to01(ref_rgb)).reshape(-1, 3)
+    q = np.linspace(0, 1, 256)
+    src_m, ref_m = src_lab.mean(0), ref_lab.mean(0)
+    src_s, ref_s = src_lab.std(0) + 1e-6, ref_lab.std(0) + 1e-6
+    return {
+        'src_Lq':      np.quantile(src_lab[:, 0], q).round(3).tolist(),
+        'ref_Lq':      np.quantile(ref_lab[:, 0], q).round(3).tolist(),
+        'src_ab_mean': src_m[1:].round(4).tolist(),
+        'ref_ab_mean': ref_m[1:].round(4).tolist(),
+        'ab_scale':    np.clip(ref_s[1:] / src_s[1:], 0.5, 2.0).round(4).tolist(),
+    }
+
+
 def compute_match(src_rgb, ref_rgb, color_strength: float = 0.85):
     """
     从 src/ref 解析 LAB 匹配变换，返回一个作用于任意 RGB 网格的函数。
 
     color_strength: a/b 色彩迁移强度（<1 抑制主体色溢出，1=完全对齐参考图均值）
     """
-    src_lab = rgb_to_lab(_to01(src_rgb)).reshape(-1, 3)
-    ref_lab = rgb_to_lab(_to01(ref_rgb)).reshape(-1, 3)
-
-    # 影调：L 通道分位数匹配（256 个分位点，稳健且单调）
-    q = np.linspace(0, 1, 256)
-    src_Lq = np.quantile(src_lab[:, 0], q)
-    ref_Lq = np.quantile(ref_lab[:, 0], q)
-
-    # 色彩：a/b 均值+方差匹配（Reinhard），方差比裁剪防过冲
-    src_m, ref_m = src_lab.mean(0), ref_lab.mean(0)
-    src_s, ref_s = src_lab.std(0) + 1e-6, ref_lab.std(0) + 1e-6
-    ab_scale = np.clip(ref_s[1:] / src_s[1:], 0.5, 2.0)
-    # 目标均值按 color_strength 从 src 均值向 ref 均值插值（抑制溢色）
-    ab_target_m = src_m[1:] + color_strength * (ref_m[1:] - src_m[1:])
+    s = compute_match_stats(src_rgb, ref_rgb)
+    src_Lq, ref_Lq = np.array(s['src_Lq']), np.array(s['ref_Lq'])
+    src_m, ref_m = np.array(s['src_ab_mean']), np.array(s['ref_ab_mean'])
+    ab_scale = np.array(s['ab_scale'])
+    ab_target_m = src_m + color_strength * (ref_m - src_m)
 
     def transform(rgb01):
         lab = rgb_to_lab(rgb01)
         L = np.interp(lab[..., 0], src_Lq, ref_Lq)
-        a = (lab[..., 1] - src_m[1]) * ab_scale[0] + ab_target_m[0]
-        b = (lab[..., 2] - src_m[2]) * ab_scale[1] + ab_target_m[1]
+        a = (lab[..., 1] - src_m[0]) * ab_scale[0] + ab_target_m[0]
+        b = (lab[..., 2] - src_m[1]) * ab_scale[1] + ab_target_m[1]
         return lab_to_rgb(np.stack([L, a, b], axis=-1))
 
     return transform

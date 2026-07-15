@@ -44,6 +44,42 @@ function applyLutToImage(imgData, lut) {
   return out;
 }
 
+// ─── LAB 色彩空间 + 解析匹配（与后端 numpy 实现一致，D65）──────────────────
+const _EPS = 216 / 24389, _KAPPA = 24389 / 27;
+const _srgb2lin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const _lin2srgb = c => { c = Math.max(0, Math.min(1, c)); return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055; };
+function rgb2lab(r, g, b) {
+  const rl = _srgb2lin(r), gl = _srgb2lin(g), bl = _srgb2lin(b);
+  const X = (rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375) / 0.95047;
+  const Y = (rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750);
+  const Z = (rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041) / 1.08883;
+  const fx = X > _EPS ? Math.cbrt(X) : (_KAPPA * X + 16) / 116;
+  const fy = Y > _EPS ? Math.cbrt(Y) : (_KAPPA * Y + 16) / 116;
+  const fz = Z > _EPS ? Math.cbrt(Z) : (_KAPPA * Z + 16) / 116;
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+function lab2rgb(L, a, b) {
+  const fy = (L + 16) / 116, fx = fy + a / 500, fz = fy - b / 200;
+  const fx3 = fx * fx * fx, fy3 = fy * fy * fy, fz3 = fz * fz * fz;
+  const xr = (fx3 > _EPS ? fx3 : (116 * fx - 16) / _KAPPA) * 0.95047;
+  const yr = (L > _KAPPA * _EPS ? fy3 : L / _KAPPA);
+  const zr = (fz3 > _EPS ? fz3 : (116 * fz - 16) / _KAPPA) * 1.08883;
+  const rl = xr * 3.2404542 + yr * -1.5371385 + zr * -0.4985314;
+  const gl = xr * -0.9692660 + yr * 1.8760108 + zr * 0.0415560;
+  const bl = xr * 0.0556434 + yr * -0.2040259 + zr * 1.0572252;
+  return [_lin2srgb(rl), _lin2srgb(gl), _lin2srgb(bl)];
+}
+// L 分位数插值（xs, ys 均单调升）
+function interpL(x, xs, ys) {
+  const n = xs.length;
+  if (x <= xs[0]) return ys[0];
+  if (x >= xs[n - 1]) return ys[n - 1];
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= x) lo = m; else hi = m; }
+  const t = (x - xs[lo]) / (xs[hi] - xs[lo] || 1);
+  return ys[lo] + t * (ys[hi] - ys[lo]);
+}
+
 const COLORS = {
   bg:          "#0a0a0a",
   surface:     "#111111",
@@ -66,6 +102,8 @@ export default function App() {
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI Style");
   const [strength,    setStrength]    = useState(1.0);  // 风格应用强度（LUT 不透明度）
+  const [matchWeight, setMatchWeight] = useState(0.7);  // 忠实还原(1) ↔ LR风格(0)
+  const [colorStr,    setColorStr]    = useState(0.85); // 色彩迁移强度（抑制溢色）
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -77,9 +115,9 @@ export default function App() {
   // 预计算缓冲：原图像素 + LUT 全量结果（strength 滑块只做混合，实时）
   const bufs = useRef(null);   // { w, h, orig: Float32, lut: Float32 }
 
-  // 结果就绪时：加载原图 → 预计算 orig + LUT 全量结果
+  // 结果就绪时：加载原图 → 预计算 orig / CNN结果 / 解析匹配的 LAB 基（L',a0,b0）
   useEffect(() => {
-    if (!result?.lut_content || !srcPreview) { bufs.current = null; return; }
+    if (!result?.lut_style || !result?.match_stats || !srcPreview) { bufs.current = null; return; }
     const img = new Image();
     img.onload = () => {
       const maxW = 1000;  // 预览分辨率（仅屏显；下载的 LUT 分辨率无关，套用时全分辨率）
@@ -90,31 +128,42 @@ export default function App() {
       const ctx = cv.getContext("2d");
       ctx.drawImage(img, 0, 0, w, h);
       const imgData = ctx.getImageData(0, 0, w, h);
-      const orig = new Float32Array(w * h * 3);
-      for (let i = 0; i < w * h; i++) {
-        orig[i * 3] = imgData.data[i * 4] / 255;
-        orig[i * 3 + 1] = imgData.data[i * 4 + 1] / 255;
-        orig[i * 3 + 2] = imgData.data[i * 4 + 2] / 255;
+      const n = w * h;
+      const st = result.match_stats;
+      const sLq = st.src_Lq, rLq = st.ref_Lq, sm = st.src_ab_mean, asc = st.ab_scale;
+      const orig = new Float32Array(n * 3);
+      const Lp = new Float32Array(n), a0 = new Float32Array(n), b0 = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const r = imgData.data[i * 4] / 255, g = imgData.data[i * 4 + 1] / 255, bl = imgData.data[i * 4 + 2] / 255;
+        orig[i * 3] = r; orig[i * 3 + 1] = g; orig[i * 3 + 2] = bl;
+        const [L, a, b] = rgb2lab(r, g, bl);
+        Lp[i] = interpL(L, sLq, rLq);            // 影调匹配后的 L
+        a0[i] = (a - sm[0]) * asc[0];            // a/b 方差匹配（色彩强度=0 的基）
+        b0[i] = (b - sm[1]) * asc[1];
       }
-      const lut = applyLutToImage(imgData, parseCube(result.lut_content));
-      bufs.current = { w, h, orig, lut };
-      renderPreview(strength);
+      const cnn = applyLutToImage(imgData, parseCube(result.lut_style));  // CNN 分支
+      bufs.current = { w, h, orig, cnn, Lp, a0, b0, st };
+      renderPreview(strength, matchWeight, colorStr);
     };
     img.src = srcPreview;
   }, [result, srcPreview]);
 
-  // strength 变化时实时混合渲染
-  useEffect(() => { renderPreview(strength); }, [strength]);
+  // 任一滑块变化 → 实时重渲染
+  useEffect(() => { renderPreview(strength, matchWeight, colorStr); }, [strength, matchWeight, colorStr]);
 
-  const renderPreview = (s) => {
+  const renderPreview = (s, mw, cs) => {
     const b = bufs.current, cv = previewCanvas.current;
     if (!b || !cv) return;
+    const { st } = b, sm = st.src_ab_mean, rm = st.ref_ab_mean;
+    const da = sm[0] + cs * (rm[0] - sm[0]), db = sm[1] + cs * (rm[1] - sm[1]);
     cv.width = b.w; cv.height = b.h;
     const ctx = cv.getContext("2d");
     const out = ctx.createImageData(b.w, b.h);
     for (let i = 0; i < b.w * b.h; i++) {
+      const A = lab2rgb(b.Lp[i], b.a0[i] + da, b.b0[i] + db);  // 解析匹配分支
       for (let ax = 0; ax < 3; ax++) {
-        const v = b.orig[i * 3 + ax] * (1 - s) + b.lut[i * 3 + ax] * s;
+        const blended = mw * A[ax] + (1 - mw) * b.cnn[i * 3 + ax];  // 忠实↔风格 混合
+        const v = b.orig[i * 3 + ax] * (1 - s) + blended * s;       // 应用强度
         out.data[i * 4 + ax] = Math.max(0, Math.min(255, v * 255));
       }
       out.data[i * 4 + 3] = 255;
@@ -187,26 +236,31 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
-  // 把风格强度烘焙进 .cube（LUT 向 identity 混合）
-  const lutWithStrength = () => {
-    if (!result?.lut_content) return null;
-    if (strength === 1.0) return result.lut_content;
-    const { size: N, data } = parseCube(result.lut_content);
-    const header = result.lut_content.split("\n").filter(l => !/^[0-9.]/.test(l.trim()) || l.trim() === "");
-    const lines = [];
-    for (const l of result.lut_content.split("\n")) {
-      if (/^[0-9.]/.test(l.trim())) break;
-      lines.push(l);
-    }
+  // 按当前三个滑块，在客户端烘焙最终 .cube（与预览完全一致）
+  const buildCube = () => {
+    if (!result?.lut_style || !result?.match_stats) return null;
+    const { size: N, data } = parseCube(result.lut_style);   // CNN 分支（identity 网格）
+    const st = result.match_stats;
+    const sLq = st.src_Lq, rLq = st.ref_Lq, sm = st.src_ab_mean, rm = st.ref_ab_mean, asc = st.ab_scale;
+    const da = sm[0] + colorStr * (rm[0] - sm[0]), db = sm[1] + colorStr * (rm[1] - sm[1]);
+    const lines = [
+      `TITLE "${presetName}"`, `LUT_3D_SIZE ${N}`,
+      "DOMAIN_MIN 0.0 0.0 0.0", "DOMAIN_MAX 1.0 1.0 1.0", "",
+    ];
     for (let i = 0; i < data.length; i++) {
-      const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
-      const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
-      const v = data[i].map((x, k) => Math.max(0, Math.min(1, id[k] * (1 - strength) + x * strength)));
+      const r = (i % N) / (N - 1), g = (Math.floor(i / N) % N) / (N - 1), bl = Math.floor(i / (N * N)) / (N - 1);
+      const [L, a, b] = rgb2lab(r, g, bl);
+      const A = lab2rgb(interpL(L, sLq, rLq), (a - sm[0]) * asc[0] + da, (b - sm[1]) * asc[1] + db);
+      const id = [r, g, bl];
+      const v = [0, 1, 2].map(k => {
+        const blended = matchWeight * A[k] + (1 - matchWeight) * data[i][k];
+        return Math.max(0, Math.min(1, id[k] * (1 - strength) + blended * strength));
+      });
       lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
     }
     return lines.join("\n") + "\n";
   };
-  const downloadLut = () => download(lutWithStrength(), "cube", "text/plain");
+  const downloadLut = () => download(buildCube(), "cube", "text/plain");
 
   return (
     <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "'Georgia','Times New Roman',serif" }}>
@@ -309,7 +363,7 @@ export default function App() {
         {result && !loading && (
           <section>
             {/* 实时效果预览（双图 LUT 模式）*/}
-            {result.lut_content && srcPreview && (
+            {result.lut_style && srcPreview && (
               <div style={{ marginBottom: "28px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "20px" }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: "12px", alignItems: "start" }}>
                   <div>
@@ -325,18 +379,20 @@ export default function App() {
                     <canvas ref={previewCanvas} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.accent}`, display: "block" }} />
                   </div>
                 </div>
-                {/* 风格强度滑块 */}
-                <div style={{ marginTop: "16px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontFamily: "monospace", color: COLORS.textDim, marginBottom: "4px" }}>
-                    <span>风格应用强度</span>
-                    <span style={{ color: COLORS.accent }}>{Math.round(strength * 100)}%</span>
-                  </div>
-                  <input type="range" min="0" max="1.5" step="0.05" value={strength}
-                    onChange={e => setStrength(parseFloat(e.target.value))}
-                    style={{ width: "100%", accentColor: COLORS.accent, cursor: "pointer" }} />
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "9px", fontFamily: "monospace", color: COLORS.textMuted, marginTop: "2px" }}>
-                    <span>0% 原图</span><span>100% 标准</span><span>150% 加强</span>
-                  </div>
+                {/* 三个滑块：忠实↔风格、色彩迁移、应用强度 */}
+                <div style={{ marginTop: "16px", display: "grid", gap: "14px" }}>
+                  <Slider label="忠实还原 ↔ LR 风格" value={matchWeight} min={0} max={1} step={0.05}
+                    display={`还原 ${Math.round(matchWeight * 100)}%`}
+                    onChange={setMatchWeight}
+                    ends={["← LR 风格（分色/不溢色）", "忠实还原（整体照搬）→"]} />
+                  <Slider label="色彩迁移强度" value={colorStr} min={0} max={1} step={0.05}
+                    display={`${Math.round(colorStr * 100)}%`}
+                    onChange={setColorStr}
+                    ends={["0% 中性（抑制溢色）", "100% 完全对齐参考色"]} />
+                  <Slider label="风格应用强度" value={strength} min={0} max={1.5} step={0.05}
+                    display={`${Math.round(strength * 100)}%`}
+                    onChange={setStrength}
+                    ends={["0% 原图", "100% 标准 · 150% 加强"]} />
                 </div>
               </div>
             )}
@@ -410,6 +466,23 @@ function DropZone({ label, sublabel, preview, onDrop, onClick, accent }) {
           <div style={{ fontSize: "10px", color: COLORS.textMuted, marginTop: "4px", fontFamily: "monospace" }}>{sublabel}</div>
         </>
       )}
+    </div>
+  );
+}
+
+function Slider({ label, value, min, max, step, display, onChange, ends }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontFamily: "monospace", color: COLORS.textDim, marginBottom: "4px" }}>
+        <span>{label}</span>
+        <span style={{ color: COLORS.accent }}>{display}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        style={{ width: "100%", accentColor: COLORS.accent, cursor: "pointer" }} />
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "9px", fontFamily: "monospace", color: COLORS.textMuted, marginTop: "2px" }}>
+        <span>{ends[0]}</span><span>{ends[1]}</span>
+      </div>
     </div>
   );
 }
