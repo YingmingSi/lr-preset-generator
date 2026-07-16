@@ -74,6 +74,28 @@ function blendStrength(o, l, s) {
   return [Math.max(0, Math.min(1, t0)), Math.max(0, Math.min(1, t1)), Math.max(0, Math.min(1, t2))];
 }
 
+// ─── 还原补偿：全局仿射校正（每通道 mean+std，拉向参考图色调，保留对比与层次）──
+// c=CNN输出色, st={cm,rm,ratio}（cnn均值/ref均值/std比）, w=还原强度[0,1]
+function reproCorrect(c, st, w) {
+  if (!st || w <= 0) return c;
+  const o = [0, 0, 0];
+  for (let k = 0; k < 3; k++) {
+    const rep = (c[k] - st.cm[k]) * st.ratio[k] + st.rm[k];  // 仿射到 ref 统计
+    o[k] = c[k] + w * (rep - c[k]);                          // 按还原强度插值
+  }
+  return o;
+}
+// 从后端 repro 统计量预计算校正参数
+function reproParams(repro) {
+  if (!repro) return null;
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  return {
+    cm: repro.cnn_mean,
+    rm: repro.ref_mean,
+    ratio: [0, 1, 2].map(k => clamp(repro.ref_std[k] / repro.cnn_std[k], 0.5, 2.0)),
+  };
+}
+
 const COLORS = {
   bg:          "#0a0a0a",
   surface:     "#111111",
@@ -96,6 +118,7 @@ export default function App() {
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI Style");
   const [strength,    setStrength]    = useState(1.0);  // 风格应用强度（LUT 不透明度）
+  const [reproStr,    setReproStr]    = useState(0.65); // 还原强度（全局解析补偿，拉向参考色调）
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -127,16 +150,16 @@ export default function App() {
         orig[i * 3 + 2] = imgData.data[i * 4 + 2] / 255;
       }
       const lut = applyLutToImage(imgData, parseCube(result.lut_content));
-      bufs.current = { w, h, orig, lut };
-      renderPreview(strength);
+      bufs.current = { w, h, orig, lut, st: reproParams(result.repro) };
+      renderPreview(strength, reproStr);
     };
     img.src = srcPreview;
   }, [result, srcPreview]);
 
-  // strength 变化时实时混合渲染
-  useEffect(() => { renderPreview(strength); }, [strength]);
+  // strength / 还原强度 变化时实时渲染
+  useEffect(() => { renderPreview(strength, reproStr); }, [strength, reproStr]);
 
-  const renderPreview = (s) => {
+  const renderPreview = (s, w) => {
     const b = bufs.current, cv = previewCanvas.current;
     if (!b || !cv) return;
     cv.width = b.w; cv.height = b.h;
@@ -144,9 +167,8 @@ export default function App() {
     const out = ctx.createImageData(b.w, b.h);
     for (let i = 0; i < b.w * b.h; i++) {
       const j = i * 3;
-      const v = blendStrength(
-        [b.orig[j], b.orig[j + 1], b.orig[j + 2]],
-        [b.lut[j], b.lut[j + 1], b.lut[j + 2]], s);
+      const graded = reproCorrect([b.lut[j], b.lut[j + 1], b.lut[j + 2]], b.st, w);  // 还原补偿
+      const v = blendStrength([b.orig[j], b.orig[j + 1], b.orig[j + 2]], graded, s); // 应用强度+保护
       out.data[i * 4] = v[0] * 255;
       out.data[i * 4 + 1] = v[1] * 255;
       out.data[i * 4 + 2] = v[2] * 255;
@@ -220,11 +242,11 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
-  // 把风格强度烘焙进 .cube（LUT 向 identity 混合）
+  // 把还原补偿 + 风格强度烘焙进 .cube（与预览完全一致）
   const lutWithStrength = () => {
     if (!result?.lut_content) return null;
-    if (strength === 1.0) return result.lut_content;
     const { size: N, data } = parseCube(result.lut_content);
+    const st = reproParams(result.repro);
     const lines = [];
     for (const l of result.lut_content.split("\n")) {
       if (/^[0-9.]/.test(l.trim())) break;
@@ -233,7 +255,8 @@ export default function App() {
     for (let i = 0; i < data.length; i++) {
       const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
       const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
-      const v = blendStrength(id, data[i], strength);  // 与预览同一套保护
+      const graded = reproCorrect(data[i], st, reproStr);      // 还原补偿
+      const v = blendStrength(id, graded, strength);           // 应用强度 + 保护
       lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
     }
     return lines.join("\n") + "\n";
@@ -357,8 +380,14 @@ export default function App() {
                     <canvas ref={previewCanvas} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.accent}`, display: "block" }} />
                   </div>
                 </div>
-                {/* 风格应用强度滑块 */}
-                <div style={{ marginTop: "16px" }}>
+                {/* 还原强度 + 风格应用强度 */}
+                <div style={{ marginTop: "16px", display: "grid", gap: "14px" }}>
+                  {result.repro && (
+                    <Slider label="还原强度" value={reproStr} min={0} max={1} step={0.05}
+                      display={`${Math.round(reproStr * 100)}%`}
+                      onChange={setReproStr}
+                      ends={["0% 纯 CNN 风格", "100% 对齐参考色调"]} />
+                  )}
                   <Slider label="风格应用强度" value={strength} min={0} max={1.5} step={0.05}
                     display={`${Math.round(strength * 100)}%`}
                     onChange={setStrength}

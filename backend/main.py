@@ -18,6 +18,7 @@ import numpy as np
 
 from modules.image_loader import load_image
 from modules.lut_generator import bake_cube_lut
+from modules.lr_image_processor import apply_lr_params
 from modules.params_config import (
     GROUP_LUMINANCE, GROUP_CURVE, GROUP_COLORGRADE, GROUP_CALIBRATION, GROUP_HSL,
 )
@@ -101,10 +102,21 @@ async def analyze(
         # CNN 预测的 LR 参数 → 烘焙成 3D LUT
         lut_content = bake_cube_lut(params, size=33, title=preset_name)
 
+        # 还原补偿统计量：CNN 结果 vs 参考图的每通道 mean/std（前端全局仿射校正用）
+        cnn_res = apply_lr_params(src_rgb, params, skip_local=True).astype(np.float32) / 255.0
+        ref_f = ref_rgb.astype(np.float32) / 255.0
+        repro = {
+            "cnn_mean": cnn_res.reshape(-1, 3).mean(0).round(5).tolist(),
+            "cnn_std":  (cnn_res.reshape(-1, 3).std(0) + 1e-4).round(5).tolist(),
+            "ref_mean": ref_f.reshape(-1, 3).mean(0).round(5).tolist(),
+            "ref_std":  (ref_f.reshape(-1, 3).std(0) + 1e-4).round(5).tolist(),
+        }
+
         response = JSONResponse({
             "success":     True,
             "summary":     _summary(params),
             "lut_content": lut_content,
+            "repro":       repro,
         })
         del src_data, ref_data, src_bytes, ref_bytes, params
         gc.collect()
