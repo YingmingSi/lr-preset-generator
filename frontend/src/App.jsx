@@ -44,6 +44,36 @@ function applyLutToImage(imgData, lut) {
   return out;
 }
 
+// ─── 强度混合 + 保护（高光/饱和度/阴影偏色）─────────────────────────────────
+// o=原色, l=LUT输出色（均 [0,1] 三元组）, s=应用强度。
+// s≤1 为纯插值（保持既定观感）；s>1 时对"外推过冲"做保护，防过曝/饱和过高/阴影偏色/断层。
+const _LUMA = [0.2126, 0.7152, 0.0722];
+const _smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+// 高光软拐点：>knee 平滑压向 1（渐近不超 1），消除硬裁剪导致的过曝与断层
+const _softHi = v => { const k = 0.90; return v > k ? k + (1 - k) * Math.tanh((v - k) / (1 - k)) : v; };
+
+function blendStrength(o, l, s) {
+  let t0 = o[0] + s * (l[0] - o[0]), t1 = o[1] + s * (l[1] - o[1]), t2 = o[2] + s * (l[2] - o[2]);
+  if (s > 1) {
+    // 以 LUT 输出色（s=1 的既定观感）为参考，只驯服超出部分
+    const Ll = _LUMA[0] * l[0] + _LUMA[1] * l[1] + _LUMA[2] * l[2];
+    const Lt = _LUMA[0] * t0 + _LUMA[1] * t1 + _LUMA[2] * t2;
+    let cl0 = l[0] - Ll, cl1 = l[1] - Ll, cl2 = l[2] - Ll;   // 参考彩度
+    let ct0 = t0 - Lt, ct1 = t1 - Lt, ct2 = t2 - Lt;         // 当前彩度
+    // 阴影偏色保护：暗部把彩度拉回既定值，抑制被放大的色偏
+    const shw = _smooth(0.05, 0.25, Ll);
+    ct0 = cl0 + shw * (ct0 - cl0); ct1 = cl1 + shw * (ct1 - cl1); ct2 = cl2 + shw * (ct2 - cl2);
+    // 饱和度保护：限制彩度幅度相对既定值的增幅
+    const magL = Math.sqrt(cl0 * cl0 + cl1 * cl1 + cl2 * cl2) + 1e-6;
+    const magT = Math.sqrt(ct0 * ct0 + ct1 * ct1 + ct2 * ct2);
+    const cap = magL * (1 + 0.5 * (s - 1)) + 0.05;
+    if (magT > cap) { const k = cap / magT; ct0 *= k; ct1 *= k; ct2 *= k; }
+    // 重组 + 高光软保护
+    t0 = _softHi(Lt + ct0); t1 = _softHi(Lt + ct1); t2 = _softHi(Lt + ct2);
+  }
+  return [Math.max(0, Math.min(1, t0)), Math.max(0, Math.min(1, t1)), Math.max(0, Math.min(1, t2))];
+}
+
 const COLORS = {
   bg:          "#0a0a0a",
   surface:     "#111111",
@@ -113,10 +143,13 @@ export default function App() {
     const ctx = cv.getContext("2d");
     const out = ctx.createImageData(b.w, b.h);
     for (let i = 0; i < b.w * b.h; i++) {
-      for (let ax = 0; ax < 3; ax++) {
-        const v = b.orig[i * 3 + ax] * (1 - s) + b.lut[i * 3 + ax] * s;
-        out.data[i * 4 + ax] = Math.max(0, Math.min(255, v * 255));
-      }
+      const j = i * 3;
+      const v = blendStrength(
+        [b.orig[j], b.orig[j + 1], b.orig[j + 2]],
+        [b.lut[j], b.lut[j + 1], b.lut[j + 2]], s);
+      out.data[i * 4] = v[0] * 255;
+      out.data[i * 4 + 1] = v[1] * 255;
+      out.data[i * 4 + 2] = v[2] * 255;
       out.data[i * 4 + 3] = 255;
     }
     ctx.putImageData(out, 0, 0);
@@ -200,7 +233,7 @@ export default function App() {
     for (let i = 0; i < data.length; i++) {
       const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
       const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
-      const v = data[i].map((x, k) => Math.max(0, Math.min(1, id[k] * (1 - strength) + x * strength)));
+      const v = blendStrength(id, data[i], strength);  // 与预览同一套保护
       lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
     }
     return lines.join("\n") + "\n";
