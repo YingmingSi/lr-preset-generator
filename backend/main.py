@@ -58,16 +58,17 @@ def _summary(cnn_params: dict) -> dict:
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 
-def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8) -> dict:
+def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8, Q: int = 17) -> dict:
     """
     还原补偿统计量：
-      · 亮度全局仿射：CNN结果 vs 参考的 luma mean/std（对齐整体明暗/对比）
+      · 亮度曲线匹配：CNN结果 与 参考 的 luma 分位数（可还原"压高光/提阴影"等非线性影调）
       · 按明暗分档的色度偏移：K 档亮度，每档 参考色度均值 − CNN色度均值
         （让阴影拉向参考阴影色、高光拉向参考高光色 → 还原色调分离）
     cnn/ref: (N,3) float [0,1]
     """
     Lc = cnn @ _LUMA
     Lr = ref @ _LUMA
+    q = np.linspace(0.0, 1.0, Q)
     # 色度 = RGB − 自身亮度（去亮度，仅保留颜色偏移）
     chroma_c = cnn - Lc[:, None]
     chroma_r = ref - Lr[:, None]
@@ -82,12 +83,10 @@ def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8) -> dict:
         centers.append(round(float((lo + hi) / 2), 4))
         delta.append((dr - dc).round(5).tolist())
     return {
-        "cnn_Lmean": round(float(Lc.mean()), 5),
-        "cnn_Lstd":  round(float(Lc.std() + 1e-4), 5),
-        "ref_Lmean": round(float(Lr.mean()), 5),
-        "ref_Lstd":  round(float(Lr.std() + 1e-4), 5),
-        "bins":      centers,       # K 个亮度档中心
-        "delta":     delta,         # K×3 每档色度偏移（RGB）
+        "cnn_Lq": np.quantile(Lc, q).round(5).tolist(),   # 亮度曲线：CNN 分位数（x）
+        "ref_Lq": np.quantile(Lr, q).round(5).tolist(),   # 亮度曲线：参考分位数（y）
+        "bins":   centers,       # K 个亮度档中心
+        "delta":  delta,         # K×3 每档色度偏移（RGB）
     }
 
 

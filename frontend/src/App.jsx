@@ -77,6 +77,16 @@ function blendStrength(o, l, s) {
 // ─── 还原补偿：亮度全局仿射 + 按明暗分档的色度偏移（还原色调分离，不发灰）──
 // 亮度对齐参考整体明暗/对比；色度按亮度档分别拉向参考同档颜色（阴影/高光各自的色）
 const _LUMA_JS = [0.2126, 0.7152, 0.0722];
+// 单调曲线插值（xs 分位数升序 → ys 目标），用于亮度曲线匹配
+function interpL(x, xs, ys) {
+  const n = xs.length;
+  if (x <= xs[0]) return ys[0];
+  if (x >= xs[n - 1]) return ys[n - 1];
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= x) lo = m; else hi = m; }
+  const t = (x - xs[lo]) / (xs[hi] - xs[lo] || 1);
+  return ys[lo] + t * (ys[hi] - ys[lo]);
+}
 function _interpDelta(L, bins, delta) {
   const n = bins.length;
   if (L <= bins[0]) return delta[0];
@@ -88,27 +98,26 @@ function _interpDelta(L, bins, delta) {
 function reproCorrect(c, st, w) {
   if (!st || w <= 0) return c;
   const L = _LUMA_JS[0] * c[0] + _LUMA_JS[1] * c[1] + _LUMA_JS[2] * c[2];
-  const Lp = (L - st.cLm) * st.Lratio + st.rLm;   // 亮度全局仿射
+  const Lp = interpL(L, st.cLq, st.rLq);          // 亮度曲线匹配（可压高光/提阴影）
   const Lc = L + w * (Lp - L);
   const d = _interpDelta(L, st.bins, st.delta);   // 该亮度档的色度偏移
   // 极值衰减：高光/近黑处减弱色度校正（避免高光染色偏黄、暗部糊死）
-  const att = (1 - 0.85 * _smooth(0.72, 0.98, L)) * _smooth(0.0, 0.05, L);
-  const o = [0, 0, 0];
-  for (let k = 0; k < 3; k++) {
-    const chroma = c[k] - L;                       // 去亮度的色度
-    o[k] = Math.max(0, Math.min(1, Lc + chroma + w * att * d[k]));
-  }
-  return o;
+  const attL = (1 - 0.85 * _smooth(0.72, 0.98, L)) * _smooth(0.0, 0.05, L);
+  // 饱和度衰减：已鲜艳的颜色少校正，保留其色相（防绿变黄等）
+  const cr = c[0] - L, cg = c[1] - L, cb = c[2] - L;
+  const mag = Math.sqrt(cr * cr + cg * cg + cb * cb);
+  const attS = 1 - 0.75 * _smooth(0.10, 0.35, mag);
+  const att = attL * attS;
+  return [
+    Math.max(0, Math.min(1, Lc + cr + w * att * d[0])),
+    Math.max(0, Math.min(1, Lc + cg + w * att * d[1])),
+    Math.max(0, Math.min(1, Lc + cb + w * att * d[2])),
+  ];
 }
 // 从后端 repro 统计量预计算校正参数
 function reproParams(repro) {
   if (!repro) return null;
-  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-  return {
-    cLm: repro.cnn_Lmean, rLm: repro.ref_Lmean,
-    Lratio: clamp(repro.ref_Lstd / repro.cnn_Lstd, 0.5, 2.0),
-    bins: repro.bins, delta: repro.delta,
-  };
+  return { cLq: repro.cnn_Lq, rLq: repro.ref_Lq, bins: repro.bins, delta: repro.delta };
 }
 
 const COLORS = {
