@@ -72,7 +72,7 @@ async def health():
     return {
         "status": "ok",
         "cnn_loaded": cnn_ready(),
-        "model": "color_cnn_v8 (72参数 → 3D LUT)" if cnn_ready() else None,
+        "model": "color_cnn_v9 (61参数 → 3D LUT)" if cnn_ready() else None,
     }
 
 
