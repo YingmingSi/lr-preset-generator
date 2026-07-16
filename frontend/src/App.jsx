@@ -98,9 +98,13 @@ function _interpDelta(L, bins, delta) {
 function reproCorrect(c, st, w) {
   if (!st || w <= 0) return c;
   const L = _LUMA_JS[0] * c[0] + _LUMA_JS[1] * c[1] + _LUMA_JS[2] * c[2];
-  const Lp = interpL(L, st.cLq, st.rLq);          // 亮度曲线匹配（对齐参考影调）
-  // 额外压高光 / 提阴影（暗部上提、亮部下压，随还原强度增强）
-  const extra = 0.18 * ((1 - _smooth(0.0, 0.5, L)) - _smooth(0.5, 1.0, L));
+  // 色调匹配保留对比：完整曲线匹配 与 纯亮度平移 的混合（只搬整体明暗，不照搬参考低对比 → 防灰）
+  const mid = st.cLq.length >> 1;
+  const LpFull = interpL(L, st.cLq, st.rLq);
+  const LpBright = L + (st.rLq[mid] - st.cLq[mid]);
+  const Lp = LpBright + 0.55 * (LpFull - LpBright);
+  // 额外影调：压高光 + 略压暗阴影（黑场沉下、增强通透，不再提亮阴影以免发灰）
+  const extra = -0.10 * _smooth(0.55, 1.0, L) - 0.07 * (1 - _smooth(0.0, 0.35, L));
   const Lc = Math.max(0, Math.min(1, L + w * (Lp - L) + w * extra));
   const d = _interpDelta(L, st.bins, st.delta);   // 该亮度档的色度偏移
   // 极值衰减：高光/近黑处减弱色度校正（避免高光染色偏黄、暗部糊死）
