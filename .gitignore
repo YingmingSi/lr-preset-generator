@@ -34,3 +34,9 @@ training/*.log
 .DS_Store
 *.log
 backend/models/*.bak
+
+# Training v9 大文件（数据集、checkpoint）
+training/data_v9/
+training/checkpoints_v9/
+# 模型备份
+backend/models/*.bak
