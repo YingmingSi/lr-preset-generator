@@ -74,14 +74,29 @@ function blendStrength(o, l, s) {
   return [Math.max(0, Math.min(1, t0)), Math.max(0, Math.min(1, t1)), Math.max(0, Math.min(1, t2))];
 }
 
-// ─── 还原补偿：全局仿射校正（每通道 mean+std，拉向参考图色调，保留对比与层次）──
-// c=CNN输出色, st={cm,rm,ratio}（cnn均值/ref均值/std比）, w=还原强度[0,1]
+// ─── 还原补偿：亮度全局仿射 + 按明暗分档的色度偏移（还原色调分离，不发灰）──
+// 亮度对齐参考整体明暗/对比；色度按亮度档分别拉向参考同档颜色（阴影/高光各自的色）
+const _LUMA_JS = [0.2126, 0.7152, 0.0722];
+function _interpDelta(L, bins, delta) {
+  const n = bins.length;
+  if (L <= bins[0]) return delta[0];
+  if (L >= bins[n - 1]) return delta[n - 1];
+  let i = 0; while (i < n - 1 && bins[i + 1] < L) i++;
+  const t = (L - bins[i]) / (bins[i + 1] - bins[i]);
+  return [0, 1, 2].map(k => delta[i][k] + t * (delta[i + 1][k] - delta[i][k]));
+}
 function reproCorrect(c, st, w) {
   if (!st || w <= 0) return c;
+  const L = _LUMA_JS[0] * c[0] + _LUMA_JS[1] * c[1] + _LUMA_JS[2] * c[2];
+  const Lp = (L - st.cLm) * st.Lratio + st.rLm;   // 亮度全局仿射
+  const Lc = L + w * (Lp - L);
+  const d = _interpDelta(L, st.bins, st.delta);   // 该亮度档的色度偏移
+  // 极值衰减：高光/近黑处减弱色度校正（避免高光染色偏黄、暗部糊死）
+  const att = (1 - 0.85 * _smooth(0.72, 0.98, L)) * _smooth(0.0, 0.05, L);
   const o = [0, 0, 0];
   for (let k = 0; k < 3; k++) {
-    const rep = (c[k] - st.cm[k]) * st.ratio[k] + st.rm[k];  // 仿射到 ref 统计
-    o[k] = c[k] + w * (rep - c[k]);                          // 按还原强度插值
+    const chroma = c[k] - L;                       // 去亮度的色度
+    o[k] = Math.max(0, Math.min(1, Lc + chroma + w * att * d[k]));
   }
   return o;
 }
@@ -90,9 +105,9 @@ function reproParams(repro) {
   if (!repro) return null;
   const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
   return {
-    cm: repro.cnn_mean,
-    rm: repro.ref_mean,
-    ratio: [0, 1, 2].map(k => clamp(repro.ref_std[k] / repro.cnn_std[k], 0.5, 2.0)),
+    cLm: repro.cnn_Lmean, rLm: repro.ref_Lmean,
+    Lratio: clamp(repro.ref_Lstd / repro.cnn_Lstd, 0.5, 2.0),
+    bins: repro.bins, delta: repro.delta,
   };
 }
 

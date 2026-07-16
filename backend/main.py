@@ -55,6 +55,42 @@ def _summary(cnn_params: dict) -> dict:
     }
 
 
+_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8) -> dict:
+    """
+    还原补偿统计量：
+      · 亮度全局仿射：CNN结果 vs 参考的 luma mean/std（对齐整体明暗/对比）
+      · 按明暗分档的色度偏移：K 档亮度，每档 参考色度均值 − CNN色度均值
+        （让阴影拉向参考阴影色、高光拉向参考高光色 → 还原色调分离）
+    cnn/ref: (N,3) float [0,1]
+    """
+    Lc = cnn @ _LUMA
+    Lr = ref @ _LUMA
+    # 色度 = RGB − 自身亮度（去亮度，仅保留颜色偏移）
+    chroma_c = cnn - Lc[:, None]
+    chroma_r = ref - Lr[:, None]
+    edges = np.linspace(0.0, 1.0, K + 1)
+    centers, delta = [], []
+    for b in range(K):
+        lo, hi = edges[b], edges[b + 1]
+        mc = (Lc >= lo) & (Lc <= hi if b == K - 1 else Lc < hi)
+        mr = (Lr >= lo) & (Lr <= hi if b == K - 1 else Lr < hi)
+        dc = chroma_c[mc].mean(0) if mc.any() else np.zeros(3, np.float32)
+        dr = chroma_r[mr].mean(0) if mr.any() else np.zeros(3, np.float32)
+        centers.append(round(float((lo + hi) / 2), 4))
+        delta.append((dr - dc).round(5).tolist())
+    return {
+        "cnn_Lmean": round(float(Lc.mean()), 5),
+        "cnn_Lstd":  round(float(Lc.std() + 1e-4), 5),
+        "ref_Lmean": round(float(Lr.mean()), 5),
+        "ref_Lstd":  round(float(Lr.std() + 1e-4), 5),
+        "bins":      centers,       # K 个亮度档中心
+        "delta":     delta,         # K×3 每档色度偏移（RGB）
+    }
+
+
 def _align(src_data, ref_data):
     """src 与 ref 尺寸对齐"""
     if src_data['rgb_float'].shape == ref_data['rgb_float'].shape:
@@ -102,15 +138,10 @@ async def analyze(
         # CNN 预测的 LR 参数 → 烘焙成 3D LUT
         lut_content = bake_cube_lut(params, size=33, title=preset_name)
 
-        # 还原补偿统计量：CNN 结果 vs 参考图的每通道 mean/std（前端全局仿射校正用）
+        # 还原补偿统计量：亮度全局仿射 + 按明暗分档的色度偏移（还原色调分离）
         cnn_res = apply_lr_params(src_rgb, params, skip_local=True).astype(np.float32) / 255.0
         ref_f = ref_rgb.astype(np.float32) / 255.0
-        repro = {
-            "cnn_mean": cnn_res.reshape(-1, 3).mean(0).round(5).tolist(),
-            "cnn_std":  (cnn_res.reshape(-1, 3).std(0) + 1e-4).round(5).tolist(),
-            "ref_mean": ref_f.reshape(-1, 3).mean(0).round(5).tolist(),
-            "ref_std":  (ref_f.reshape(-1, 3).std(0) + 1e-4).round(5).tolist(),
-        }
+        repro = _repro_stats(cnn_res.reshape(-1, 3), ref_f.reshape(-1, 3))
 
         response = JSONResponse({
             "success":     True,
