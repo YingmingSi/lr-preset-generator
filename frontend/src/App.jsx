@@ -105,19 +105,26 @@ function reproCorrect(c, st, w) {
   const Lp = LpBright + 0.55 * (LpFull - LpBright);
   // 额外影调：压高光 + 略压暗阴影（黑场沉下、增强通透，不再提亮阴影以免发灰）
   const extra = -0.10 * _smooth(0.55, 1.0, L) - 0.07 * (1 - _smooth(0.0, 0.35, L));
-  const Lc = Math.max(0, Math.min(1, L + w * (Lp - L) + w * extra));
-  const d = _interpDelta(L, st.bins, st.delta);   // 该亮度档的色度偏移
+  // 黑场锚定：深阴影只许压暗、不许被抬（防"黑色强行拉高"造成断层/发灰），压暗照常
+  let shift = w * (Lp - L) + w * extra;
+  if (shift > 0) shift *= _smooth(0.0, 0.10, L);
+  const Lc = Math.max(0, Math.min(1, L + shift));
+  // 色度偏移 + 幅度上限（情况B 防参考内容色整体染色）
+  let d0 = 0, d1 = 0, d2 = 0;
+  { const d = _interpDelta(L, st.bins, st.delta); d0 = d[0]; d1 = d[1]; d2 = d[2]; }
+  const dmag = Math.sqrt(d0 * d0 + d1 * d1 + d2 * d2);
+  if (dmag > 0.12) { const k = 0.12 / dmag; d0 *= k; d1 *= k; d2 *= k; }
   // 极值衰减：高光/近黑处减弱色度校正（避免高光染色偏黄、暗部糊死）
   const attL = (1 - 0.85 * _smooth(0.72, 0.98, L)) * _smooth(0.0, 0.05, L);
   // 饱和度衰减：已鲜艳的颜色少校正，保留其色相（防绿变黄等）
   const cr = c[0] - L, cg = c[1] - L, cb = c[2] - L;
   const mag = Math.sqrt(cr * cr + cg * cg + cb * cb);
   const attS = 1 - 0.75 * _smooth(0.10, 0.35, mag);
-  const att = attL * attS;
+  const att = attL * attS * w;
   return [
-    Math.max(0, Math.min(1, Lc + cr + w * att * d[0])),
-    Math.max(0, Math.min(1, Lc + cg + w * att * d[1])),
-    Math.max(0, Math.min(1, Lc + cb + w * att * d[2])),
+    Math.max(0, Math.min(1, Lc + cr + att * d0)),
+    Math.max(0, Math.min(1, Lc + cg + att * d1)),
+    Math.max(0, Math.min(1, Lc + cb + att * d2)),
   ];
 }
 // 从后端 repro 统计量预计算校正参数
