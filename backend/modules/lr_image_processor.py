@@ -301,10 +301,13 @@ def _apply_color_grading(img: np.ndarray, p: dict) -> np.ndarray:
 
         if sat > 0:
             tint = hsv_to_single(hue / 360.0, 1.0, 1.0)
+            tint_mean = (tint[0] + tint[1] + tint[2]) / 3.0
             # 系数 1.5：sat≤10 范围内也能产生可见 tint（sat=10 → ~15%）
             blend = mask[..., 0] * 1.5 * sat
+            # 只移色相、保亮度：向 (像素亮度 + tint 色度) 混合，避免把阴影抬成亮色
             for c in range(3):
-                img[..., c] = img[..., c] * (1 - blend) + tint[c] * blend
+                target = lum[..., 0] + (tint[c] - tint_mean)
+                img[..., c] = img[..., c] * (1 - blend) + target * blend
         if lum_adj:
             img = img + lum_adj * 0.3 * mask
     return np.clip(img, 0, 1)
