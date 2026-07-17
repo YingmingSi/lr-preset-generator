@@ -57,6 +57,10 @@ def _summary(cnn_params: dict) -> dict:
 
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
+# 影调匹配参数（情况B 不该迁移——会把亮原图压暗/抬阴影成浑浊）
+_TONAL_PARAMS = {'Exposure', 'Contrast', 'Highlights', 'Shadows', 'Blacks', 'Whites'} | {
+    f'LumaCurve{i}' for i in range(5)}
+
 
 def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8, Q: int = 17) -> dict:
     """
@@ -131,8 +135,10 @@ async def analyze(
         del src_data, ref_data, src_bytes, ref_bytes
         params = cnn_predict(src_rgb, ref_rgb)
 
-        # CNN 预测的 LR 参数 → 烘焙成 3D LUT
+        # 两个 LUT：完整（含影调匹配）+ 仅颜色（压掉影调，保留原图明暗——情况B 首选）
         lut_content = bake_cube_lut(params, size=33, title=preset_name)
+        params_color = {k: (0 if k in _TONAL_PARAMS else v) for k, v in params.items()}
+        lut_color = bake_cube_lut(params_color, size=33, title=preset_name)
 
         # 还原补偿统计量：降采样到 256 计算（只需全局分布，省内存峰值）
         src_s = _shrink(src_rgb, 256)
@@ -148,10 +154,11 @@ async def analyze(
         response = JSONResponse({
             "success":     True,
             "summary":     _summary(params),
-            "lut_content": lut_content,
+            "lut_content": lut_content,   # 完整（含影调）
+            "lut_color":   lut_color,     # 仅颜色（保留原图明暗）
             "repro":       repro,
         })
-        del src_rgb, ref_rgb, params, lut_content, repro
+        del src_rgb, ref_rgb, params, lut_content, lut_color, repro
         gc.collect()
         return response
 
