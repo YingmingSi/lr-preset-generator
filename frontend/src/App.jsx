@@ -115,19 +115,15 @@ function _interpDelta(L, bins, delta) {
 function reproCorrect(c, st, w) {
   if (!st || w <= 0) return c;
   const L = _LUMA_JS[0] * c[0] + _LUMA_JS[1] * c[1] + _LUMA_JS[2] * c[2];
-  // 迁移参考的"影调形态+对比"，但对齐到【原图曝光】而非参考绝对明暗
-  // （情况B：参考图暗是其内容暗，不该把亮的原图整体压暗）
+  // 曝光对齐原图：用【乘性增益】而非加性平移——0×gain=0 天然保黑，绝不抬黑
+  // （情况B：参考暗是其内容暗，只把整体曝光拉回原图，不照搬参考绝对明暗）
   const mid = st.cLq.length >> 1;
-  const cMed = st.cLq[mid], rMed = st.rLq[mid], target = st.srcLmed;
-  const LpFull = interpL(L, st.cLq, st.rLq) - rMed + target;  // 参考影调形态，置于原图曝光
-  const LpBright = L + (target - cMed);                       // 整体明暗回到原图曝光
-  const Lp = LpBright + 0.55 * (LpFull - LpBright);
-  // 额外影调：压高光 + 略压暗阴影（黑场沉下、增强通透，不再提亮阴影以免发灰）
+  const cMed = st.cLq[mid], target = st.srcLmed;
+  const gain = Math.max(0.5, Math.min(target / Math.max(cMed, 0.06), 2.2));
+  let Lc = L * (1 + w * (gain - 1));
+  // 压高光 / 压暗阴影（黑处为负 → 更黑，不抬黑）；软高光防过曝
   const extra = -0.10 * _smooth(0.55, 1.0, L) - 0.07 * (1 - _smooth(0.0, 0.35, L));
-  // 黑场锚定：深阴影只许压暗、不许被抬（防"黑色强行拉高"造成断层/发灰），压暗照常
-  let shift = w * (Lp - L) + w * extra;
-  if (shift > 0) shift *= _smooth(0.0, 0.10, L);
-  const Lc = Math.max(0, Math.min(1, L + shift));
+  Lc = _softHi(Math.max(0, Lc + w * extra));
   // 色度偏移 + 幅度上限（情况B 防参考内容色整体染色）
   let d0 = 0, d1 = 0, d2 = 0;
   { const d = _interpDelta(L, st.bins, st.delta); d0 = d[0]; d1 = d[1]; d2 = d[2]; }
