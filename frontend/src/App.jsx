@@ -74,6 +74,23 @@ function blendStrength(o, l, s) {
   return [Math.max(0, Math.min(1, t0)), Math.max(0, Math.min(1, t1)), Math.max(0, Math.min(1, t2))];
 }
 
+// 深阴影守卫：原图本就深黑的像素，限制被抬亮 + 去掉强加的饱和色（防"阴影拉高染色/断层"）
+// orig=原色, out=处理后色。仅在原图深阴影(Lo<~0.16)介入，中高调不受影响。
+function shadowGuard(orig, out) {
+  const Lo = 0.2126 * orig[0] + 0.7152 * orig[1] + 0.0722 * orig[2];
+  const g = _smooth(0.02, 0.16, Lo);          // 0=原图纯黑 → 1=出阴影区
+  if (g >= 0.999) return out;
+  const Lout = 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2];
+  const maxL = Lo + 0.04 + 0.10 * g;          // 限制抬亮：纯黑最多到 0.04
+  const Lc = Math.min(Lout, maxL);
+  const desat = 0.35 + 0.65 * g;              // 去饱和：纯黑只留 35% 彩度
+  return [
+    Math.max(0, Math.min(1, Lc + (out[0] - Lout) * desat)),
+    Math.max(0, Math.min(1, Lc + (out[1] - Lout) * desat)),
+    Math.max(0, Math.min(1, Lc + (out[2] - Lout) * desat)),
+  ];
+}
+
 // ─── 还原补偿：亮度全局仿射 + 按明暗分档的色度偏移（还原色调分离，不发灰）──
 // 亮度对齐参考整体明暗/对比；色度按亮度档分别拉向参考同档颜色（阴影/高光各自的色）
 const _LUMA_JS = [0.2126, 0.7152, 0.0722];
@@ -204,8 +221,9 @@ export default function App() {
     const out = ctx.createImageData(b.w, b.h);
     for (let i = 0; i < b.w * b.h; i++) {
       const j = i * 3;
+      const orig = [b.orig[j], b.orig[j + 1], b.orig[j + 2]];
       const graded = reproCorrect([b.lut[j], b.lut[j + 1], b.lut[j + 2]], b.st, w);  // 还原补偿
-      const v = blendStrength([b.orig[j], b.orig[j + 1], b.orig[j + 2]], graded, s); // 应用强度+保护
+      const v = shadowGuard(orig, blendStrength(orig, graded, s));                   // 应用强度+保护+深阴影守卫
       out.data[i * 4] = v[0] * 255;
       out.data[i * 4 + 1] = v[1] * 255;
       out.data[i * 4 + 2] = v[2] * 255;
@@ -293,7 +311,7 @@ export default function App() {
       const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
       const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
       const graded = reproCorrect(data[i], st, reproStr);      // 还原补偿
-      const v = blendStrength(id, graded, strength);           // 应用强度 + 保护
+      const v = shadowGuard(id, blendStrength(id, graded, strength)); // 应用强度 + 保护 + 深阴影守卫
       lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
     }
     return lines.join("\n") + "\n";
