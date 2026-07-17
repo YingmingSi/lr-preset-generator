@@ -18,9 +18,9 @@ import numpy as np
 
 from modules.image_loader import load_image
 from modules.lut_generator import bake_cube_lut
-from modules.lr_image_processor import apply_lr_params
 from modules.params_config import (
     GROUP_LUMINANCE, GROUP_CURVE, GROUP_COLORGRADE, GROUP_CALIBRATION, GROUP_HSL,
+    HSL_COLORS,
 )
 from modules.cnn_predictor import (
     load_predictor as load_cnn, predict_params as cnn_predict,
@@ -60,6 +60,18 @@ _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 # 影调匹配参数（情况B 不该迁移——会把亮原图压暗/抬阴影成浑浊）
 _TONAL_PARAMS = {'Exposure', 'Contrast', 'Highlights', 'Shadows', 'Blacks', 'Whites'} | {
     f'LumaCurve{i}' for i in range(5)}
+
+
+def _tame_colors(params: dict) -> dict:
+    """情况B：CNN 常预测过强的'减饱和/压暗颜色'(如红-37、-44)导致发灰，
+    负向的 HSL 饱和/明度调整只保留 35%，避免颜色被抹灰。"""
+    out = dict(params)
+    for c in HSL_COLORS:
+        for pre in ('SaturationAdjustment', 'LuminanceAdjustment'):
+            k = pre + c
+            if out.get(k, 0) < 0:
+                out[k] = int(round(out[k] * 0.35))
+    return out
 
 
 def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8, Q: int = 17) -> dict:
@@ -134,31 +146,22 @@ async def analyze(
         ref_rgb = (ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
         del src_data, ref_data, src_bytes, ref_bytes
         params = cnn_predict(src_rgb, ref_rgb)
+        del src_rgb, ref_rgb
+        # 防灰：抑制情况B 常见的过度减饱和/压暗颜色
+        params_t = _tame_colors(params)
 
         # 两个 LUT：完整（含影调匹配）+ 仅颜色（压掉影调，保留原图明暗——情况B 首选）
-        lut_content = bake_cube_lut(params, size=33, title=preset_name)
-        params_color = {k: (0 if k in _TONAL_PARAMS else v) for k, v in params.items()}
+        lut_content = bake_cube_lut(params_t, size=33, title=preset_name)
+        params_color = {k: (0 if k in _TONAL_PARAMS else v) for k, v in params_t.items()}
         lut_color = bake_cube_lut(params_color, size=33, title=preset_name)
-
-        # 还原补偿统计量：降采样到 256 计算（只需全局分布，省内存峰值）
-        src_s = _shrink(src_rgb, 256)
-        ref_s = _shrink(ref_rgb, 256)
-        cnn_res = apply_lr_params(src_s, params, skip_local=True).astype(np.float32) / 255.0
-        ref_f = ref_s.astype(np.float32) / 255.0
-        repro = _repro_stats(cnn_res.reshape(-1, 3), ref_f.reshape(-1, 3))
-        # 原图中位亮度：让还原补偿对齐到"原图曝光"而非参考图（情况B 保留原图明暗）
-        src_L = (src_s.astype(np.float32) / 255.0).reshape(-1, 3) @ _LUMA
-        repro["src_Lmed"] = round(float(np.median(src_L)), 5)
-        del src_s, ref_s, cnn_res, ref_f, src_L
 
         response = JSONResponse({
             "success":     True,
             "summary":     _summary(params),
             "lut_content": lut_content,   # 完整（含影调）
             "lut_color":   lut_color,     # 仅颜色（保留原图明暗）
-            "repro":       repro,
         })
-        del src_rgb, ref_rgb, params, lut_content, lut_color, repro
+        del params, params_t, params_color, lut_content, lut_color
         gc.collect()
         return response
 

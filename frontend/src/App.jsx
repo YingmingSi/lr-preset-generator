@@ -91,6 +91,19 @@ function shadowGuard(orig, out) {
   ];
 }
 
+// 三轴混合：颜色迁移(原图↔仅颜色LUT) + 影调迁移(仅颜色↔完整LUT) + 应用强度(整体) + 深阴影守卫
+function stylePixel(orig, c0, c1, c2, f0, f1, f2, colorAmt, toneAmt, strength) {
+  const s0 = orig[0] + colorAmt * (c0 - orig[0]) + toneAmt * (f0 - c0);
+  const s1 = orig[1] + colorAmt * (c1 - orig[1]) + toneAmt * (f1 - c1);
+  const s2 = orig[2] + colorAmt * (c2 - orig[2]) + toneAmt * (f2 - c2);
+  const out = [
+    Math.max(0, Math.min(1, orig[0] + strength * (s0 - orig[0]))),
+    Math.max(0, Math.min(1, orig[1] + strength * (s1 - orig[1]))),
+    Math.max(0, Math.min(1, orig[2] + strength * (s2 - orig[2]))),
+  ];
+  return shadowGuard(orig, out);
+}
+
 // ─── 还原补偿：亮度全局仿射 + 按明暗分档的色度偏移（还原色调分离，不发灰）──
 // 亮度对齐参考整体明暗/对比；色度按亮度档分别拉向参考同档颜色（阴影/高光各自的色）
 const _LUMA_JS = [0.2126, 0.7152, 0.0722];
@@ -169,9 +182,9 @@ export default function App() {
   const [refPreview,  setRefPreview]  = useState(null);
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI Style");
-  const [strength,    setStrength]    = useState(1.0);  // 风格应用强度（LUT 不透明度）
-  const [toneAmt,     setToneAmt]     = useState(0);    // 影调迁移：0=保留原图明暗，1=完整跟随参考影调
-  const [reproStr,    setReproStr]    = useState(0);    // 还原强度（解析色彩补偿，默认关，避免情况B染色）
+  const [colorAmt,    setColorAmt]    = useState(1.0);  // 颜色迁移：0=原图颜色，1=完整参考色彩风格
+  const [toneAmt,     setToneAmt]     = useState(0);    // 影调迁移：0=保留原图明暗，1=跟随参考影调
+  const [strength,    setStrength]    = useState(1.0);  // 应用强度：整体不透明度
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -204,16 +217,16 @@ export default function App() {
       }
       const cnnColor = applyLutToImage(imgData, parseCube(result.lut_color || result.lut_content));
       const cnnFull  = applyLutToImage(imgData, parseCube(result.lut_content));
-      bufs.current = { w, h, orig, cnnColor, cnnFull, st: reproParams(result.repro) };
-      renderPreview(strength, reproStr, toneAmt);
+      bufs.current = { w, h, orig, cnnColor, cnnFull };
+      renderPreview(colorAmt, toneAmt, strength);
     };
     img.src = srcPreview;
   }, [result, srcPreview]);
 
   // 任一滑块变化时实时渲染
-  useEffect(() => { renderPreview(strength, reproStr, toneAmt); }, [strength, reproStr, toneAmt]);
+  useEffect(() => { renderPreview(colorAmt, toneAmt, strength); }, [colorAmt, toneAmt, strength]);
 
-  const renderPreview = (s, w, t) => {
+  const renderPreview = (ca, t, s) => {
     const b = bufs.current, cv = previewCanvas.current;
     if (!b || !cv) return;
     cv.width = b.w; cv.height = b.h;
@@ -222,14 +235,8 @@ export default function App() {
     for (let i = 0; i < b.w * b.h; i++) {
       const j = i * 3;
       const orig = [b.orig[j], b.orig[j + 1], b.orig[j + 2]];
-      // 影调迁移：仅颜色 LUT ↔ 完整 LUT 之间插值（t=0 保留原图明暗）
-      const cnn = [
-        b.cnnColor[j] + t * (b.cnnFull[j] - b.cnnColor[j]),
-        b.cnnColor[j + 1] + t * (b.cnnFull[j + 1] - b.cnnColor[j + 1]),
-        b.cnnColor[j + 2] + t * (b.cnnFull[j + 2] - b.cnnColor[j + 2]),
-      ];
-      const graded = reproCorrect(cnn, b.st, w);
-      const v = shadowGuard(orig, blendStrength(orig, graded, s));
+      const v = stylePixel(orig, b.cnnColor[j], b.cnnColor[j + 1], b.cnnColor[j + 2],
+        b.cnnFull[j], b.cnnFull[j + 1], b.cnnFull[j + 2], ca, t, s);
       out.data[i * 4] = v[0] * 255;
       out.data[i * 4 + 1] = v[1] * 255;
       out.data[i * 4 + 2] = v[2] * 255;
@@ -303,12 +310,11 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
-  // 把影调迁移 + 还原补偿 + 风格强度烘焙进 .cube（与预览完全一致）
+  // 把三滑块烘焙进 .cube（与预览完全一致）
   const lutWithStrength = () => {
     if (!result?.lut_content) return null;
     const { size: N, data: dFull } = parseCube(result.lut_content);
     const { data: dColor } = parseCube(result.lut_color || result.lut_content);
-    const st = reproParams(result.repro);
     const lines = [];
     for (const l of result.lut_content.split("\n")) {
       if (/^[0-9.]/.test(l.trim())) break;
@@ -317,9 +323,8 @@ export default function App() {
     for (let i = 0; i < dFull.length; i++) {
       const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
       const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
-      const cnn = [0, 1, 2].map(k => dColor[i][k] + toneAmt * (dFull[i][k] - dColor[i][k]));  // 影调迁移
-      const graded = reproCorrect(cnn, st, reproStr);          // 还原补偿
-      const v = shadowGuard(id, blendStrength(id, graded, strength)); // 应用强度 + 保护 + 深阴影守卫
+      const v = stylePixel(id, dColor[i][0], dColor[i][1], dColor[i][2],
+        dFull[i][0], dFull[i][1], dFull[i][2], colorAmt, toneAmt, strength);
       lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
     }
     return lines.join("\n") + "\n";
@@ -443,24 +448,22 @@ export default function App() {
                     <canvas ref={previewCanvas} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.accent}`, display: "block" }} />
                   </div>
                 </div>
-                {/* 影调迁移 + 还原强度 + 风格应用强度 */}
+                {/* 颜色迁移 + 影调迁移 + 应用强度 */}
                 <div style={{ marginTop: "16px", display: "grid", gap: "14px" }}>
+                  <Slider label="颜色迁移" value={colorAmt} min={0} max={1} step={0.05}
+                    display={`${Math.round(colorAmt * 100)}%`}
+                    onChange={setColorAmt}
+                    ends={["0% 原图颜色", "100% 参考色彩风格"]} />
                   {result.lut_color && (
                     <Slider label="影调迁移" value={toneAmt} min={0} max={1} step={0.05}
                       display={`${Math.round(toneAmt * 100)}%`}
                       onChange={setToneAmt}
                       ends={["0% 保留原图明暗", "100% 跟随参考影调"]} />
                   )}
-                  {result.repro && (
-                    <Slider label="还原强度（色彩）" value={reproStr} min={0} max={1} step={0.05}
-                      display={`${Math.round(reproStr * 100)}%`}
-                      onChange={setReproStr}
-                      ends={["0% 关", "100% 对齐参考色调"]} />
-                  )}
-                  <Slider label="风格应用强度" value={strength} min={0} max={1} step={0.05}
+                  <Slider label="应用强度" value={strength} min={0} max={1} step={0.05}
                     display={`${Math.round(strength * 100)}%`}
                     onChange={setStrength}
-                    ends={["0% 原图", "100% 标准"]} />
+                    ends={["0% 原图", "100% 全量"]} />
                 </div>
               </div>
             )}
