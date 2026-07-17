@@ -140,7 +140,10 @@ async def analyze(
         cnn_res = apply_lr_params(src_s, params, skip_local=True).astype(np.float32) / 255.0
         ref_f = ref_s.astype(np.float32) / 255.0
         repro = _repro_stats(cnn_res.reshape(-1, 3), ref_f.reshape(-1, 3))
-        del src_s, ref_s, cnn_res, ref_f
+        # 原图中位亮度：让还原补偿对齐到"原图曝光"而非参考图（情况B 保留原图明暗）
+        src_L = (src_s.astype(np.float32) / 255.0).reshape(-1, 3) @ _LUMA
+        repro["src_Lmed"] = round(float(np.median(src_L)), 5)
+        del src_s, ref_s, cnn_res, ref_f, src_L
 
         response = JSONResponse({
             "success":     True,

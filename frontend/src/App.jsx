@@ -115,10 +115,12 @@ function _interpDelta(L, bins, delta) {
 function reproCorrect(c, st, w) {
   if (!st || w <= 0) return c;
   const L = _LUMA_JS[0] * c[0] + _LUMA_JS[1] * c[1] + _LUMA_JS[2] * c[2];
-  // 色调匹配保留对比：完整曲线匹配 与 纯亮度平移 的混合（只搬整体明暗，不照搬参考低对比 → 防灰）
+  // 迁移参考的"影调形态+对比"，但对齐到【原图曝光】而非参考绝对明暗
+  // （情况B：参考图暗是其内容暗，不该把亮的原图整体压暗）
   const mid = st.cLq.length >> 1;
-  const LpFull = interpL(L, st.cLq, st.rLq);
-  const LpBright = L + (st.rLq[mid] - st.cLq[mid]);
+  const cMed = st.cLq[mid], rMed = st.rLq[mid], target = st.srcLmed;
+  const LpFull = interpL(L, st.cLq, st.rLq) - rMed + target;  // 参考影调形态，置于原图曝光
+  const LpBright = L + (target - cMed);                       // 整体明暗回到原图曝光
   const Lp = LpBright + 0.55 * (LpFull - LpBright);
   // 额外影调：压高光 + 略压暗阴影（黑场沉下、增强通透，不再提亮阴影以免发灰）
   const extra = -0.10 * _smooth(0.55, 1.0, L) - 0.07 * (1 - _smooth(0.0, 0.35, L));
@@ -147,7 +149,7 @@ function reproCorrect(c, st, w) {
 // 从后端 repro 统计量预计算校正参数
 function reproParams(repro) {
   if (!repro) return null;
-  return { cLq: repro.cnn_Lq, rLq: repro.ref_Lq, bins: repro.bins, delta: repro.delta };
+  return { cLq: repro.cnn_Lq, rLq: repro.ref_Lq, srcLmed: repro.src_Lmed, bins: repro.bins, delta: repro.delta };
 }
 
 const COLORS = {
