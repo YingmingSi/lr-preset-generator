@@ -16,7 +16,8 @@ Lightroom 风格图像处理器（72 维参数版，numpy）
 
 import numpy as np
 import colorsys
-from scipy.ndimage import gaussian_filter
+# 注：scipy 仅用于局部对比（Texture/Clarity/Dehaze）。后端始终 skip_local，
+# 故惰性导入，避免启动时加载 scipy 占内存。
 
 from modules.params_config import HSL_COLORS, HSL_COLOR_HUE
 
@@ -194,6 +195,8 @@ def _apply_local_contrast(img: np.ndarray, p: dict) -> np.ndarray:
     texture = p.get('Texture', 0) / 100.0
     clarity = p.get('Clarity', 0) / 100.0
     dehaze  = p.get('Dehaze', 0) / 100.0
+
+    from scipy.ndimage import gaussian_filter  # 惰性导入（仅此函数用到）
 
     lum = img.mean(axis=2)
 

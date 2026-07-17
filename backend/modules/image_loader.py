@@ -78,6 +78,12 @@ def _load_standard(file_bytes: bytes) -> dict:
     """加载JPG/PNG，检测压缩特征，转换到sRGB"""
     img = Image.open(io.BytesIO(file_bytes))
 
+    # JPEG 按比例低分辨率解码（1/2、1/4、1/8），避免全解码大图占满内存
+    try:
+        img.draft('RGB', (1024, 1024))
+    except Exception:
+        pass
+
     # 检测色彩配置文件并转换到sRGB
     img = _convert_to_srgb(img)
 

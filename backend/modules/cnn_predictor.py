@@ -41,6 +41,9 @@ class CNNParameterPredictor:
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # 内存受限部署（Render 免费层 512MB）：关闭内存池/复用模式，降低常驻与峰值
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
         self.session = ort.InferenceSession(
             model_path, sess_options=opts, providers=['CPUExecutionProvider'])
         self.is_loaded = True

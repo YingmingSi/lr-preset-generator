@@ -90,17 +90,14 @@ def _repro_stats(cnn: np.ndarray, ref: np.ndarray, K: int = 8, Q: int = 17) -> d
     }
 
 
-def _align(src_data, ref_data):
-    """src 与 ref 尺寸对齐"""
-    if src_data['rgb_float'].shape == ref_data['rgb_float'].shape:
-        return src_data
-    from scipy.ndimage import zoom
-    h, w = ref_data['rgb_float'].shape[:2]
-    hs, ws = src_data['rgb_float'].shape[:2]
-    scale = (h / hs, w / ws)
-    src_data['rgb_float'] = np.stack(
-        [zoom(src_data['rgb_float'][:, :, c], scale, order=1) for c in range(3)], axis=2)
-    return src_data
+def _shrink(rgb: np.ndarray, max_side: int = 256) -> np.ndarray:
+    """降采样 uint8 图（还原统计量只需全局分布，小图足够，省内存）"""
+    from PIL import Image
+    h, w = rgb.shape[:2]
+    if max(h, w) <= max_side:
+        return rgb
+    s = max_side / max(h, w)
+    return np.asarray(Image.fromarray(rgb).resize((int(w * s), int(h * s)), Image.BILINEAR))
 
 
 @app.get("/health")
@@ -128,19 +125,22 @@ async def analyze(
     try:
         src_data = load_image(src_bytes, src_image.filename or "src.jpg")
         ref_data = load_image(ref_bytes, ref_image.filename or "ref.jpg")
-        src_data = _align(src_data, ref_data)
 
         src_rgb = (src_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
         ref_rgb = (ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8)
+        del src_data, ref_data, src_bytes, ref_bytes
         params = cnn_predict(src_rgb, ref_rgb)
 
         # CNN 预测的 LR 参数 → 烘焙成 3D LUT
         lut_content = bake_cube_lut(params, size=33, title=preset_name)
 
-        # 还原补偿统计量：亮度全局仿射 + 按明暗分档的色度偏移（还原色调分离）
-        cnn_res = apply_lr_params(src_rgb, params, skip_local=True).astype(np.float32) / 255.0
-        ref_f = ref_rgb.astype(np.float32) / 255.0
+        # 还原补偿统计量：降采样到 256 计算（只需全局分布，省内存峰值）
+        src_s = _shrink(src_rgb, 256)
+        ref_s = _shrink(ref_rgb, 256)
+        cnn_res = apply_lr_params(src_s, params, skip_local=True).astype(np.float32) / 255.0
+        ref_f = ref_s.astype(np.float32) / 255.0
         repro = _repro_stats(cnn_res.reshape(-1, 3), ref_f.reshape(-1, 3))
+        del src_s, ref_s, cnn_res, ref_f
 
         response = JSONResponse({
             "success":     True,
@@ -148,7 +148,7 @@ async def analyze(
             "lut_content": lut_content,
             "repro":       repro,
         })
-        del src_data, ref_data, src_bytes, ref_bytes, params
+        del src_rgb, ref_rgb, params, lut_content, repro
         gc.collect()
         return response
 
