@@ -63,14 +63,21 @@ _TONAL_PARAMS = {'Exposure', 'Contrast', 'Highlights', 'Shadows', 'Blacks', 'Whi
 
 
 def _tame_colors(params: dict) -> dict:
-    """情况B：CNN 常预测过强的'减饱和/压暗颜色'(如红-37、-44)导致发灰，
-    负向的 HSL 饱和/明度调整只保留 35%，避免颜色被抹灰。"""
+    """情况B：CNN 常预测过强的'减饱和/压暗颜色'(如红-37、-44)——让颜色发灰、
+    红等鲜艳色掉饱和。风格迁移应偏向'色相/暖调'而非抹灰，故强抑制各处的
+    '减饱和'(负向饱和只留 15%)，并少压暗颜色明度(负向明度留 40%)。"""
     out = dict(params)
     for c in HSL_COLORS:
-        for pre in ('SaturationAdjustment', 'LuminanceAdjustment'):
-            k = pre + c
-            if out.get(k, 0) < 0:
-                out[k] = int(round(out[k] * 0.35))
+        if out.get('SaturationAdjustment' + c, 0) < 0:
+            out['SaturationAdjustment' + c] = int(round(out['SaturationAdjustment' + c] * 0.15))
+        if out.get('LuminanceAdjustment' + c, 0) < 0:
+            out['LuminanceAdjustment' + c] = int(round(out['LuminanceAdjustment' + c] * 0.40))
+    for c in ('Red', 'Green', 'Blue'):                       # 相机校准的减饱和
+        if out.get(c + 'Saturation', 0) < 0:
+            out[c + 'Saturation'] = int(round(out[c + 'Saturation'] * 0.20))
+    for k in ('Saturation', 'Vibrance'):                     # 全局减饱和
+        if out.get(k, 0) < 0:
+            out[k] = int(round(out[k] * 0.30))
     return out
 
 
