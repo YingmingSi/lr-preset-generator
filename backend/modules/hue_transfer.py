@@ -89,13 +89,19 @@ def build_hue_map(dens, thr=0.08, rng=0.16):
         pk = np.array([int(np.argmax(dens))])
     ph, pd = hue_j[pk], dens[pk]                     # 峰的色相 / 密度
 
+    def smoothstep(a, b, x):
+        t = np.clip((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t)
+
     hue_map = hue_j.copy()
     for i in range(_HN):
         if is_peak[i]:                       # 独立色峰 → 保持（各自单独调整，不塌不并）
             continue
-        score = pd * np.exp(-0.5 * (cdist(ph, hue_j[i]) / rng) ** 2)  # 又强又近的峰
+        dist = cdist(ph, hue_j[i])
+        score = pd * np.exp(-0.5 * (dist / rng) ** 2)                # 又强又近的峰
         j = int(np.argmax(score))
-        weight = np.clip(1 - dens[i] / (pd[j] + 1e-9), 0, 1)         # 仅 谷/缺失色 → 吸附最近强峰
+        # 距离闸门：目标峰太远(>~65°)→不动，保留原色（暖参考里的绿/红不被吃）
+        gate = 1 - smoothstep(0.08, 0.18, float(dist[j]))
+        weight = np.clip(1 - dens[i] / (pd[j] + 1e-9), 0, 1) * gate  # 仅"附近有峰的谷/缺失色"才吸附
         d = (((ph[j] - hue_j[i] + 0.5) % 1.0) - 0.5)
         hue_map[i] = (hue_j[i] + weight * d) % 1.0
     return hue_map
@@ -126,11 +132,12 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=1.0) -> str:
-    """色相匹配（独立色各自保持）+ 饱和/亮度按均值平移（保对比）→ .cube 3D LUT。"""
+                 hue_str=0.0, sat_str=1.0, val_str=1.0) -> str:
+    """色相保持不变（不吃色）+ 饱和/亮度按每色相均值平移（保对比，向参考倾斜）→ .cube 3D LUT。
+    hue_str=0 关闭色相偏移（最稳，任何色不被吃）；>0 才启用色相分布匹配。"""
     _, s_sat, s_val = _ref_maps(rgb_to_hsv_vectorized(_to01(src_rgb)))   # 原图每色相均值
     dens, r_sat, r_val = _ref_maps(rgb_to_hsv_vectorized(_to01(ref_rgb)))
-    hue_map = build_hue_map(dens)
+    hue_map = build_hue_map(dens) if hue_str > 0 else (np.arange(_HN) + 0.5) / _HN
     N = size
     idx = np.arange(N ** 3)
     grid = np.stack([idx % N, (idx // N) % N, idx // (N * N)], axis=1).astype(np.float32) / (N - 1)
