@@ -117,8 +117,13 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
     conf = np.clip(dens[oi] / (dens.max() + 1e-9), 0, 1)
     dS = (r_sat[oi] - s_sat[hi]) * swt * conf
     dV = (r_val[oi] - s_val[hi]) * swt * conf
-    oS = np.clip(S + sat_str * dS, 0, 1)
-    oV = np.clip(V + val_str * dV, 0, 1)
+    # 过曝/死黑保护：接近极值时减弱该方向的推动（亮部别再提亮、暗部别再压暗、别过饱和）
+    def sstep(a, b, x):
+        t = np.clip((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t)
+    gV = np.where(dV > 0, 1 - sstep(0.82, 1.0, V), sstep(0.0, 0.18, V))
+    gS = np.where(dS > 0, 1 - sstep(0.85, 1.0, S), 1.0)
+    oS = np.clip(S + sat_str * dS * gS, 0, 1)
+    oV = np.clip(V + val_str * dV * gV, 0, 1)
     return np.clip(hsv_to_rgb_vectorized(np.stack([oH, oS, oV], axis=-1)), 0, 1)
 
 
@@ -135,11 +140,15 @@ def _zone_weights(L):
 
 
 def _grade_shifts(src01, ref01):
-    """颜色分级：参考 vs 原图 在 阴影/中间/高光 的色度(去亮度)均值之差。"""
+    """颜色分级：参考 vs 原图 在 阴影/中间/高光 的色度均值之差。
+    偏重【近中性】像素——色调分离的真实色偏体现在灰面上，而非饱和内容色；
+    这样估出的才是'grade'本身，避免内容色造成全图色偏。"""
     def zone_chroma(img):
         L = img @ _LUMA3
         chroma = (img - L[..., None]).reshape(-1, 3)
-        sh, mid, hi = (w.reshape(-1) for w in _zone_weights(L))
+        cmag = np.sqrt((chroma ** 2).sum(1))              # 每像素色度大小 ≈ 饱和度
+        neutral = np.clip((0.16 - cmag) / (0.16 - 0.04), 0, 1)  # 只取近中性灰面(饱和内容排除)
+        sh, mid, hi = (w.reshape(-1) * neutral for w in _zone_weights(L))
         return tuple((chroma * w[:, None]).sum(0) / (w.sum() + 1e-9) for w in (sh, mid, hi))
     s_sh, s_mid, s_hi = zone_chroma(src01)
     r_sh, r_mid, r_hi = zone_chroma(ref01)
@@ -167,7 +176,11 @@ def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
         Lg = out @ _LUMA3
         sw, mw, hw = _zone_weights(Lg)
         grade = sw[:, None] * gsh[0] + mw[:, None] * gsh[1] + hw[:, None] * gsh[2]
-        out = np.clip(out + grade_str * grade, 0, 1)
+        # 极值保护：近纯黑/纯白处减弱，防死黑被抬、纯白染色
+        def sstep(a, b, x):
+            t = np.clip((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t)
+        ext = (sstep(0.0, 0.06, Lg) * (1 - sstep(0.94, 1.0, Lg)))[:, None]
+        out = np.clip(out + grade_str * grade * ext, 0, 1)
     lines = [f'TITLE "{title}"', f'LUT_3D_SIZE {N}',
              'DOMAIN_MIN 0.0 0.0 0.0', 'DOMAIN_MAX 1.0 1.0 1.0', '']
     lines.extend(f'{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}' for v in out)
