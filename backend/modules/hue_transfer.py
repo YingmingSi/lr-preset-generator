@@ -188,7 +188,7 @@ def _grade_shifts(src01, ref01):
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=0.7, val_str=0.7, grade_str=0.7) -> str:
+                 hue_str=1.0, sat_str=0.85, val_str=0.5, grade_str=1.0) -> str:
     """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 +
     颜色分级(阴影/中间/高光三区色度匹配参考，保亮度) → .cube 3D LUT。"""
     src01, ref01 = _to01(src_rgb), _to01(ref_rgb)
