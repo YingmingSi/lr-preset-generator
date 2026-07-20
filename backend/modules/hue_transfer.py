@@ -70,7 +70,7 @@ def _ref_maps(ref_hsv):
     return dens_light, sat_map, val_map
 
 
-def build_hue_map(dens, thr=0.08):
+def build_hue_map(dens, thr=0.08, rng=0.16, pull=0.5):
     """色相映射：参考里"有"的色相 → 保持原样（identity，不塌不并）；
     参考里"没有"的色相 → 吸附到最近的 present 色相。软阈值平滑过渡。
     （关键：present 色相绝不被大峰吞并——避免橙/绿都塌成脏黄的 bug）"""
@@ -82,18 +82,22 @@ def build_hue_map(dens, thr=0.08):
     def cdist(a, b):
         d = np.abs(a - b); return np.minimum(d, 1 - d)
 
-    # 参考的色相"峰"（局部极大 + 够高）——缺失色吸附到最近的峰【中心】
+    # 参考的色相"峰"（局部极大 + 够高）
     is_peak = (dens >= np.roll(dens, 1)) & (dens >= np.roll(dens, -1)) & (dens > thr * dmax)
-    peaks = hue_j[is_peak]
-    if peaks.size == 0:
-        peaks = hue_j[[int(np.argmax(dens))]]
+    pk = np.where(is_peak)[0]
+    if pk.size == 0:
+        pk = np.array([int(np.argmax(dens))])
+    ph, pd = hue_j[pk], dens[pk]                     # 峰的色相 / 密度
 
-    conf = np.clip(dens / (thr * dmax), 0, 1)        # 支撑度：≥阈值→1(保持)，0→吸附到峰
-    hue_map = np.empty(_HN)
+    hue_map = hue_j.copy()
     for i in range(_HN):
-        near = float(peaks[np.argmin(cdist(peaks, hue_j[i]))])      # 最近的参考色相峰
-        d = (((near - hue_j[i] + 0.5) % 1.0) - 0.5)
-        hue_map[i] = (hue_j[i] + (1 - conf[i]) * d) % 1.0           # 有→identity，无→吸附到峰
+        score = pd * np.exp(-0.5 * (cdist(ph, hue_j[i]) / rng) ** 2)  # 又强又近的峰
+        j = int(np.argmax(score))
+        weight = np.clip(1 - dens[i] / (pd[j] + 1e-9), 0, 1)         # 该色越弱于目标峰→越归拢
+        if is_peak[i]:
+            weight *= pull      # 独立峰：pull=0 保持(绿安全)，pull↑ 弱峰向强峰归拢(蓝→青)
+        d = (((ph[j] - hue_j[i] + 0.5) % 1.0) - 0.5)
+        hue_map[i] = (hue_j[i] + weight * d) % 1.0
     return hue_map
 
 
@@ -122,11 +126,12 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=0.5) -> str:
-    """色相分布匹配 + 饱和/亮度按均值平移（保对比）→ .cube 3D LUT。"""
+                 hue_str=1.0, sat_str=1.0, val_str=0.5, pull=0.5) -> str:
+    """色相分布匹配 + 饱和/亮度按均值平移（保对比）→ .cube 3D LUT。
+    pull=色相归拢强度：0=各独立色保留(绿安全)，↑=弱色向邻近强色归拢(蓝→青)。"""
     _, s_sat, s_val = _ref_maps(rgb_to_hsv_vectorized(_to01(src_rgb)))   # 原图每色相均值
     dens, r_sat, r_val = _ref_maps(rgb_to_hsv_vectorized(_to01(ref_rgb)))
-    hue_map = build_hue_map(dens)
+    hue_map = build_hue_map(dens, pull=pull)
     N = size
     idx = np.arange(N ** 3)
     grid = np.stack([idx % N, (idx // N) % N, idx // (N * N)], axis=1).astype(np.float32) / (N - 1)

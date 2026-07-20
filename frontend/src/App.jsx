@@ -184,6 +184,7 @@ export default function App() {
   const [presetName,  setPresetName]  = useState("AI Style");
   const [strength,    setStrength]    = useState(1.0);  // 迁移强度：0=原图，1=完整迁移，>1=加强
   const [modeChoice,  setModeChoice]  = useState("auto"); // auto / A(精确复刻同图) / B(色相迁移)
+  const [pull,        setPull]        = useState(0.5);    // 色相归拢：0=各色保留，↑=弱色向强色归拢
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -269,6 +270,7 @@ export default function App() {
     form.append("ref_image",    refFile);
     form.append("preset_name",  presetName);
     form.append("mode",         modeChoice);
+    form.append("pull",         pull);
 
     // 冷启动可能失败/超时，自动重试（每次间隔递增，覆盖 ~40s 唤醒窗口）
     const submit = async () => {
@@ -377,6 +379,16 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {/* 色相归拢（情况B，生成前设置）*/}
+          {modeChoice !== "A" && (
+            <div style={{ marginBottom: "12px" }}>
+              <Slider label="色相归拢（改后需重新生成）" value={pull} min={0} max={1} step={0.05}
+                display={`${Math.round(pull * 100)}%`}
+                onChange={setPull}
+                ends={["0% 各色保留（绿/独立色不动）", "100% 弱色向强色归拢（蓝→青）"]} />
+            </div>
+          )}
 
           {/* Options row */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "16px", alignItems: "center", marginBottom: "10px" }}>
