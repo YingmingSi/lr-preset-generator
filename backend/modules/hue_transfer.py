@@ -122,20 +122,52 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
     return np.clip(hsv_to_rgb_vectorized(np.stack([oH, oS, oV], axis=-1)), 0, 1)
 
 
+_LUMA3 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def _zone_weights(L):
+    """按亮度分 阴影/中间调/高光 三区的软权重（归一化）。"""
+    sh = np.clip(1 - L / 0.5, 0, 1)          # 1@黑 → 0@中
+    hi = np.clip((L - 0.5) / 0.5, 0, 1)      # 0@中 → 1@白
+    mid = np.clip(1 - np.abs(L - 0.5) * 2, 0, 1)
+    s = sh + mid + hi + 1e-9
+    return sh / s, mid / s, hi / s
+
+
+def _grade_shifts(src01, ref01):
+    """颜色分级：参考 vs 原图 在 阴影/中间/高光 的色度(去亮度)均值之差。"""
+    def zone_chroma(img):
+        L = img @ _LUMA3
+        chroma = (img - L[..., None]).reshape(-1, 3)
+        sh, mid, hi = (w.reshape(-1) for w in _zone_weights(L))
+        return tuple((chroma * w[:, None]).sum(0) / (w.sum() + 1e-9) for w in (sh, mid, hi))
+    s_sh, s_mid, s_hi = zone_chroma(src01)
+    r_sh, r_mid, r_hi = zone_chroma(ref01)
+    return np.stack([r_sh - s_sh, r_mid - s_mid, r_hi - s_hi])   # (3,3)
+
+
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=1.0) -> str:
-    """双图 per-band 色相有界靠拢（小幅微调、不跨band塌陷）+ 饱和/亮度按每色相
-    均值平移（保对比、向参考倾斜）→ .cube 3D LUT。"""
-    src_hsv = rgb_to_hsv_vectorized(_to01(src_rgb))
-    ref_hsv = rgb_to_hsv_vectorized(_to01(ref_rgb))
+                 hue_str=1.0, sat_str=1.0, val_str=1.0, grade_str=0.7) -> str:
+    """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 +
+    颜色分级(阴影/中间/高光三区色度匹配参考，保亮度) → .cube 3D LUT。"""
+    src01, ref01 = _to01(src_rgb), _to01(ref_rgb)
+    src_hsv = rgb_to_hsv_vectorized(src01)
+    ref_hsv = rgb_to_hsv_vectorized(ref01)
     _, s_sat, s_val = _ref_maps(src_hsv)                # 原图每色相均值
     dens, r_sat, r_val = _ref_maps(ref_hsv)
     hue_map = build_hue_map(src_hsv, ref_hsv)
+    gsh = _grade_shifts(src01, ref01)                  # (3,3) 三区色度差
     N = size
     idx = np.arange(N ** 3)
     grid = np.stack([idx % N, (idx // N) % N, idx // (N * N)], axis=1).astype(np.float32) / (N - 1)
     out = _apply(grid.reshape(N, N * N, 3), hue_map, dens, s_sat, s_val, r_sat, r_val,
                  hue_str, sat_str, val_str).reshape(N ** 3, 3)
+    # 颜色分级：按每个输出色的亮度，叠加三区色度差（保亮度）
+    if grade_str > 0:
+        Lg = out @ _LUMA3
+        sw, mw, hw = _zone_weights(Lg)
+        grade = sw[:, None] * gsh[0] + mw[:, None] * gsh[1] + hw[:, None] * gsh[2]
+        out = np.clip(out + grade_str * grade, 0, 1)
     lines = [f'TITLE "{title}"', f'LUT_3D_SIZE {N}',
              'DOMAIN_MIN 0.0 0.0 0.0', 'DOMAIN_MAX 1.0 1.0 1.0', '']
     lines.extend(f'{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}' for v in out)

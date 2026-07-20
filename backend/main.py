@@ -68,6 +68,7 @@ async def analyze(
     ref_image:   UploadFile = File(...),
     preset_name: str = Form("AI Style"),
     mode:        str = Form("auto"),      # auto / A(精确复刻) / B(色相迁移)
+    grade:       float = Form(0.7),       # 颜色分级强度（情况B）：阴影/中间/高光三区色偏
 ):
     src_bytes = await src_image.read()
     ref_bytes = await ref_image.read()
@@ -92,7 +93,8 @@ async def analyze(
             mode = "A"
         else:
             # 情况B：不同照片 → 按色相外观匹配（内容无关）
-            lut_content, deltas = bake_hue_lut(src_rgb, ref_rgb, size=33, title=preset_name)
+            lut_content, deltas = bake_hue_lut(src_rgb, ref_rgb, size=33, title=preset_name,
+                                               grade_str=float(np.clip(grade, 0, 1.5)))
             summary = _summary(deltas)
             summary['迁移模式'] = {'情况B · 按色相匹配': '内容无关的颜色迁移'}
             mode = "B"
