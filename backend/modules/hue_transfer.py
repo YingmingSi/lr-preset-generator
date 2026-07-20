@@ -53,36 +53,44 @@ def _circ_smooth(a, frac):
 
 
 def _ref_maps(ref_hsv):
-    """参考图按色相(256)的：密度、平均饱和、平均亮度（均按饱和度加权 + 环形平滑）。"""
+    """参考图按色相(256)的：密度(轻平滑,判'有没有该色')、平均饱和、平均亮度。"""
     H = ref_hsv[..., 0].ravel()
     S = ref_hsv[..., 1].ravel()
     V = ref_hsv[..., 2].ravel()
     hi = np.clip((H * _HN).astype(int), 0, _HN - 1)
     dens = np.zeros(_HN); np.add.at(dens, hi, S)
-    ssum = np.zeros(_HN); np.add.at(ssum, hi, S * S)      # 饱和度加权的 sat
+    ssum = np.zeros(_HN); np.add.at(ssum, hi, S * S)
     vsum = np.zeros(_HN); np.add.at(vsum, hi, S * V)
-    dens = np.maximum(_circ_smooth(dens, 0.05), 0)
+    dens_light = np.maximum(_circ_smooth(dens, 0.02), 0)  # 轻平滑：真实有像素才算"有"
+    dens_heavy = np.maximum(_circ_smooth(dens, 0.05), 0)  # 较宽：稳定 sat/val 归一化
     ssum = _circ_smooth(ssum, 0.05)
     vsum = _circ_smooth(vsum, 0.05)
-    sat_map = np.where(dens > 1e-6, ssum / np.maximum(dens, 1e-9), 0.0)
-    val_map = np.where(dens > 1e-6, vsum / np.maximum(dens, 1e-9), 0.0)
-    return dens, sat_map, val_map
+    sat_map = np.where(dens_heavy > 1e-6, ssum / np.maximum(dens_heavy, 1e-9), 0.0)
+    val_map = np.where(dens_heavy > 1e-6, vsum / np.maximum(dens_heavy, 1e-9), 0.0)
+    return dens_light, sat_map, val_map
 
 
-def build_hue_map(dens, sigma=0.09, sharp=1.6):
-    """色相分布匹配：query 色相 → 目标色相（向参考密集色相靠拢，锐化偏向峰）。"""
-    d = dens ** sharp
+def build_hue_map(dens, thr=0.08):
+    """色相映射：参考里"有"的色相 → 保持原样（identity，不塌不并）；
+    参考里"没有"的色相 → 吸附到最近的 present 色相。软阈值平滑过渡。
+    （关键：present 色相绝不被大峰吞并——避免橙/绿都塌成脏黄的 bug）"""
     hue_j = (np.arange(_HN) + 0.5) / _HN
-    ang = 2 * np.pi * hue_j
-    hue_map = hue_j.copy()
-    if d.sum() < 1e-6:
-        return hue_map
+    dmax = float(dens.max())
+    if dmax < 1e-9:
+        return hue_j.copy()
+    supp = hue_j[dens > thr * dmax]                  # 参考里"有"的色相
+    if supp.size == 0:
+        return hue_j.copy()
+
+    def cdist(a, b):
+        d = np.abs(a - b); return np.minimum(d, 1 - d)
+
+    conf = np.clip(dens / (thr * dmax), 0, 1)        # 支撑度：≥阈值→1(保持)，0→吸附
+    hue_map = np.empty(_HN)
     for i in range(_HN):
-        dist = np.minimum(np.abs(hue_j - hue_j[i]), 1 - np.abs(hue_j - hue_j[i]))
-        w = d * np.exp(-0.5 * (dist / sigma) ** 2)
-        if w.sum() < 1e-9:
-            continue
-        hue_map[i] = (np.arctan2((w * np.sin(ang)).sum(), (w * np.cos(ang)).sum()) / (2 * np.pi)) % 1.0
+        near = float(supp[np.argmin(cdist(supp, hue_j[i]))])       # 最近 present 色相
+        d = (((near - hue_j[i] + 0.5) % 1.0) - 0.5)               # 环形有向差
+        hue_map[i] = (hue_j[i] + (1 - conf[i]) * d) % 1.0         # 有→identity，无→吸附
     return hue_map
 
 
