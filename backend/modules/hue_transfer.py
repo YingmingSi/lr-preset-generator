@@ -94,34 +94,37 @@ def build_hue_map(dens, thr=0.08):
     return hue_map
 
 
-def _apply(rgb01, hue_map, dens, sat_map, val_map, hue_str=1.0, sat_str=1.0, val_str=0.5):
-    """先按分布匹配改色相，再按【目标色相】取参考的饱和/亮度来调（护中性）。"""
+def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
+           hue_str=1.0, sat_str=1.0, val_str=0.5):
+    """色相分布匹配；饱和/亮度按【参考均值 − 原图均值】整体平移
+    （保留原图同色相内的明暗/饱和对比，不抹平），护中性。"""
     hsv = rgb_to_hsv_vectorized(rgb01)
     H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     swt = np.clip(S * 2, 0, 1)
+    hi = np.clip((H * _HN).astype(int), 0, _HN - 1)
     # 1) 色相：分布匹配
-    tgt = hue_map[np.clip((H * _HN).astype(int), 0, _HN - 1)]
-    dhue = (((tgt - H + 0.5) % 1.0) - 0.5)
+    dhue = (((hue_map[hi] - H + 0.5) % 1.0) - 0.5)
     oH = (H + hue_str * dhue * swt) % 1.0
-    # 2) 饱和/亮度：按【偏移后】色相取参考值，conf=目标色相在参考里的支撑度
+    # 2) 饱和/亮度：整体平移 = 参考(目标色相均值) − 原图(原色相均值)，保留个体偏差
     oi = np.clip((oH * _HN).astype(int), 0, _HN - 1)
     conf = np.clip(dens[oi] / (dens.max() + 1e-9), 0, 1)
-    tsat = sat_map[oi]; tval = val_map[oi]
-    oS = np.clip(S + sat_str * (tsat - S) * swt * conf, 0, 1)
-    oV = np.clip(V + val_str * (tval - V) * swt * conf, 0, 1)
+    dS = (r_sat[oi] - s_sat[hi]) * swt * conf
+    dV = (r_val[oi] - s_val[hi]) * swt * conf
+    oS = np.clip(S + sat_str * dS, 0, 1)
+    oV = np.clip(V + val_str * dV, 0, 1)
     return np.clip(hsv_to_rgb_vectorized(np.stack([oH, oS, oV], axis=-1)), 0, 1)
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
                  hue_str=1.0, sat_str=1.0, val_str=0.5) -> str:
-    """色相分布匹配 + 目标色相的饱和/亮度匹配 → .cube 3D LUT。"""
-    ref_hsv = rgb_to_hsv_vectorized(_to01(ref_rgb))
-    dens, sat_map, val_map = _ref_maps(ref_hsv)
+    """色相分布匹配 + 饱和/亮度按均值平移（保对比）→ .cube 3D LUT。"""
+    _, s_sat, s_val = _ref_maps(rgb_to_hsv_vectorized(_to01(src_rgb)))   # 原图每色相均值
+    dens, r_sat, r_val = _ref_maps(rgb_to_hsv_vectorized(_to01(ref_rgb)))
     hue_map = build_hue_map(dens)
     N = size
     idx = np.arange(N ** 3)
     grid = np.stack([idx % N, (idx // N) % N, idx // (N * N)], axis=1).astype(np.float32) / (N - 1)
-    out = _apply(grid.reshape(N, N * N, 3), hue_map, dens, sat_map, val_map,
+    out = _apply(grid.reshape(N, N * N, 3), hue_map, dens, s_sat, s_val, r_sat, r_val,
                  hue_str, sat_str, val_str).reshape(N ** 3, 3)
     lines = [f'TITLE "{title}"', f'LUT_3D_SIZE {N}',
              'DOMAIN_MIN 0.0 0.0 0.0', 'DOMAIN_MAX 1.0 1.0 1.0', '']
