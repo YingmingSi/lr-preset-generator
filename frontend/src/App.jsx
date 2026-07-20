@@ -426,6 +426,13 @@ export default function App() {
             {/* 实时效果预览（双图 LUT 模式）*/}
             {result.lut_content && srcPreview && (
               <div style={{ marginBottom: "28px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "20px" }}>
+                {result.mode && (
+                  <div style={{ marginBottom: "12px", fontSize: "11px", fontFamily: "monospace", letterSpacing: "0.06em", color: COLORS.accent }}>
+                    {result.mode === "A"
+                      ? "● 情况A · 空间对应 — 同一张图，精确复刻参考调色（含色相旋转）"
+                      : "● 情况B · 按色相匹配 — 不同照片，内容无关的颜色迁移"}
+                  </div>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: "12px", alignItems: "start" }}>
                   <div>
                     <FieldLabel>原图</FieldLabel>

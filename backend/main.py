@@ -20,6 +20,7 @@ from PIL import Image
 
 from modules.image_loader import load_image
 from modules.hue_transfer import bake_hue_lut
+from modules.correspondence import is_aligned, bake_correspondence_lut
 
 app = FastAPI(title="LR Style LUT", version="4.0.0")
 
@@ -80,11 +81,25 @@ async def analyze(
         ref_rgb = _shrink((ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8), 256)
         del src_data, ref_data, src_bytes, ref_bytes
 
-        lut_content, deltas = bake_hue_lut(src_rgb, ref_rgb, size=33, title=preset_name)
+        if is_aligned(src_rgb, ref_rgb):
+            # 情况A：同一张图调色 → 空间对应，精确复刻（含色相旋转）
+            if ref_rgb.shape != src_rgb.shape:
+                ref_rgb = np.asarray(Image.fromarray(ref_rgb).resize(
+                    (src_rgb.shape[1], src_rgb.shape[0]), Image.BILINEAR))
+            lut_content = bake_correspondence_lut(src_rgb, ref_rgb, size=33, title=preset_name)
+            summary = {'迁移模式': {'情况A · 空间对应': '精确复刻参考调色（含色相旋转）'}}
+            mode = "A"
+        else:
+            # 情况B：不同照片 → 按色相外观匹配（内容无关）
+            lut_content, deltas = bake_hue_lut(src_rgb, ref_rgb, size=33, title=preset_name)
+            summary = _summary(deltas)
+            summary['迁移模式'] = {'情况B · 按色相匹配': '内容无关的颜色迁移'}
+            mode = "B"
 
         response = JSONResponse({
             "success":     True,
-            "summary":     _summary(deltas),
+            "mode":        mode,
+            "summary":     summary,
             "lut_content": lut_content,
         })
         del src_rgb, ref_rgb, lut_content
