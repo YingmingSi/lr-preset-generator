@@ -179,11 +179,16 @@ def _grade_shifts(src01, ref01):
         return tuple((chroma * w[:, None]).sum(0) / (w.sum() + 1e-9) for w in (sh, mid, hi))
     s_sh, s_mid, s_hi = zone_chroma(src01)
     r_sh, r_mid, r_hi = zone_chroma(ref01)
-    return np.stack([r_sh - s_sh, r_mid - s_mid, r_hi - s_hi])   # (3,3)
+    grade = np.stack([r_sh - s_sh, r_mid - s_mid, r_hi - s_hi])   # (3,3)
+    # 阴影/高光色相分离：削弱两者共有的色偏（同向=假分离/全局色偏），让二者更互补
+    shared = 0.5 * (grade[0] + grade[2])
+    grade[0] -= 0.45 * shared
+    grade[2] -= 0.45 * shared
+    return grade
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=0.6, grade_str=0.7) -> str:
+                 hue_str=1.0, sat_str=0.7, val_str=0.7, grade_str=0.7) -> str:
     """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 +
     颜色分级(阴影/中间/高光三区色度匹配参考，保亮度) → .cube 3D LUT。"""
     src01, ref01 = _to01(src_rgb), _to01(ref_rgb)
