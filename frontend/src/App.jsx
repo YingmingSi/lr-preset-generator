@@ -448,7 +448,7 @@ export default function App() {
                   <div style={{ marginBottom: "12px", fontSize: "11px", fontFamily: "monospace", letterSpacing: "0.06em", color: COLORS.accent }}>
                     {result.mode === "A"
                       ? "● 情况A · 空间对应 — 同一张图，精确复刻参考调色（含色相旋转）"
-                      : "● 情况B · 按色相匹配 — 每个色相保持不变，饱和/亮度向参考倾斜（不吃色、保对比）"}
+                      : "● 情况B · 按色相匹配 — 色相 band 内小幅微调(不跨band塌陷) + 饱和/亮度向参考倾斜(保对比)"}
                   </div>
                 )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: "12px", alignItems: "start" }}>

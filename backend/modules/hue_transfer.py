@@ -70,40 +70,31 @@ def _ref_maps(ref_hsv):
     return dens_light, sat_map, val_map
 
 
-def build_hue_map(dens, thr=0.08, rng=0.16):
-    """色相映射：参考里"有"的色相 → 保持原样（identity，不塌不并）；
-    参考里"没有"的色相 → 吸附到最近的 present 色相。软阈值平滑过渡。
-    （关键：present 色相绝不被大峰吞并——避免橙/绿都塌成脏黄的 bug）"""
+def build_hue_map(src_hsv, ref_hsv, max_shift=0.055):
+    """双图 per-band 色相靠拢（有界）：把原图每个色相 band 的色相，
+    向参考图【同一 band】的色相靠拢，偏移限制在 band 内且不超过 max_shift(~20°)。
+    → 小幅微调(红更橙/绿更翠)，但相近色绝不跨 band 塌陷；参考缺该 band 则不动。"""
     hue_j = (np.arange(_HN) + 0.5) / _HN
-    dmax = float(dens.max())
-    if dmax < 1e-9:
-        return hue_j.copy()
+    ss = _band_stats(src_hsv)
+    rs = _band_stats(ref_hsv)
+    dhue_band = np.zeros(_NB)
+    for b in range(_NB):
+        sh, _, _, sw = ss[b]
+        rh, _, _, rw = rs[b]
+        if sw < _W_MIN or rw < _W_MIN:               # 该 band 两边不都有 → 不动（不吃色）
+            continue
+        dhue_band[b] = np.clip(rh - sh, -max_shift, max_shift)   # band 内靠拢，限幅
 
     def cdist(a, b):
         d = np.abs(a - b); return np.minimum(d, 1 - d)
 
-    # 参考的色相"峰"（局部极大 + 够高）
-    is_peak = (dens >= np.roll(dens, 1)) & (dens >= np.roll(dens, -1)) & (dens > thr * dmax)
-    pk = np.where(is_peak)[0]
-    if pk.size == 0:
-        pk = np.array([int(np.argmax(dens))])
-    ph, pd = hue_j[pk], dens[pk]                     # 峰的色相 / 密度
-
-    def smoothstep(a, b, x):
-        t = np.clip((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t)
-
     hue_map = hue_j.copy()
+    centers = (np.arange(_NB) + 0.5) / _NB
     for i in range(_HN):
-        if is_peak[i]:                       # 独立色峰 → 保持（各自单独调整，不塌不并）
-            continue
-        dist = cdist(ph, hue_j[i])
-        score = pd * np.exp(-0.5 * (dist / rng) ** 2)                # 又强又近的峰
-        j = int(np.argmax(score))
-        # 距离闸门：目标峰太远(>~65°)→不动，保留原色（暖参考里的绿/红不被吃）
-        gate = 1 - smoothstep(0.08, 0.18, float(dist[j]))
-        weight = np.clip(1 - dens[i] / (pd[j] + 1e-9), 0, 1) * gate  # 仅"附近有峰的谷/缺失色"才吸附
-        d = (((ph[j] - hue_j[i] + 0.5) % 1.0) - 0.5)
-        hue_map[i] = (hue_j[i] + weight * d) % 1.0
+        m = np.clip(1 - cdist(centers, hue_j[i]) * _NB, 0, 1)     # 到各 band 的软隶属
+        tot = m.sum()
+        if tot > 1e-6:
+            hue_map[i] = (hue_j[i] + (m * dhue_band).sum() / tot) % 1.0
     return hue_map
 
 
@@ -132,12 +123,14 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=0.0, sat_str=1.0, val_str=1.0) -> str:
-    """色相保持不变（不吃色）+ 饱和/亮度按每色相均值平移（保对比，向参考倾斜）→ .cube 3D LUT。
-    hue_str=0 关闭色相偏移（最稳，任何色不被吃）；>0 才启用色相分布匹配。"""
-    _, s_sat, s_val = _ref_maps(rgb_to_hsv_vectorized(_to01(src_rgb)))   # 原图每色相均值
-    dens, r_sat, r_val = _ref_maps(rgb_to_hsv_vectorized(_to01(ref_rgb)))
-    hue_map = build_hue_map(dens) if hue_str > 0 else (np.arange(_HN) + 0.5) / _HN
+                 hue_str=1.0, sat_str=1.0, val_str=1.0) -> str:
+    """双图 per-band 色相有界靠拢（小幅微调、不跨band塌陷）+ 饱和/亮度按每色相
+    均值平移（保对比、向参考倾斜）→ .cube 3D LUT。"""
+    src_hsv = rgb_to_hsv_vectorized(_to01(src_rgb))
+    ref_hsv = rgb_to_hsv_vectorized(_to01(ref_rgb))
+    _, s_sat, s_val = _ref_maps(src_hsv)                # 原图每色相均值
+    dens, r_sat, r_val = _ref_maps(ref_hsv)
+    hue_map = build_hue_map(src_hsv, ref_hsv)
     N = size
     idx = np.arange(N ** 3)
     grid = np.stack([idx % N, (idx // N) % N, idx // (N * N)], axis=1).astype(np.float32) / (N - 1)
