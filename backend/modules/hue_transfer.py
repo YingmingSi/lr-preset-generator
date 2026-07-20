@@ -70,28 +70,55 @@ def _ref_maps(ref_hsv):
     return dens_light, sat_map, val_map
 
 
-def build_hue_map(src_hsv, ref_hsv, max_shift=0.055):
-    """双图 per-band 色相靠拢（有界）：把原图每个色相 band 的色相，
-    向参考图【同一 band】的色相靠拢，偏移限制在 band 内且不超过 max_shift(~20°)。
-    → 小幅微调(红更橙/绿更翠)，但相近色绝不跨 band 塌陷；参考缺该 band 则不动。"""
-    hue_j = (np.arange(_HN) + 0.5) / _HN
-    ss = _band_stats(src_hsv)
-    rs = _band_stats(ref_hsv)
-    dhue_band = np.zeros(_NB)
-    for b in range(_NB):
-        sh, _, _, sw = ss[b]
-        rh, _, _, rw = rs[b]
-        if sw < _W_MIN or rw < _W_MIN:               # 该 band 两边不都有 → 不动（不吃色）
+# 非均匀色相 band：(中心, 半宽, 最大偏移) 单位=色相比例(×360=度)
+# 暖色(红橙黄绿)细分、小幅调整、防塌；青蓝紫合并成一个【宽 band】、允许大幅靠拢(蓝→青)——
+# 一张图通常只出现青/蓝/紫之一，合并不会互相吃，且用均值平移保留其间对比。
+_BANDS = [
+    (0.00, 0.055, 0.05),   # 红
+    (0.09, 0.05,  0.05),   # 橙
+    (0.16, 0.05,  0.05),   # 黄
+    (0.25, 0.06,  0.06),   # 黄绿
+    (0.35, 0.09,  0.06),   # 绿
+    (0.65, 0.22,  0.15),   # 青蓝紫（宽，最大偏移 ~54°）
+    (0.90, 0.06,  0.06),   # 品红
+]
+
+
+def _band_offsets(hsv):
+    """每个 band 的 加权(饱和度) 平均色相偏移(相对 band 中心) 与 权重。"""
+    H = hsv[..., 0].ravel(); S = hsv[..., 1].ravel()
+    n = len(_BANDS)
+    offs = np.zeros(n); ws = np.zeros(n)
+    for bi, (c, hw, _) in enumerate(_BANDS):
+        d = np.minimum(np.abs(H - c), 1 - np.abs(H - c))
+        m = np.clip(1 - d / hw, 0, 1) * S
+        wsum = float(m.sum())
+        if wsum < _W_MIN:
             continue
-        dhue_band[b] = np.clip(rh - sh, -max_shift, max_shift)   # band 内靠拢，限幅
+        hoff = (((H - c + 0.5) % 1.0) - 0.5)
+        offs[bi] = float((hoff * m).sum() / wsum); ws[bi] = wsum
+    return offs, ws
 
-    def cdist(a, b):
-        d = np.abs(a - b); return np.minimum(d, 1 - d)
 
+def build_hue_map(src_hsv, ref_hsv):
+    """双图 per-band 色相靠拢：源每个 band 的平均色相 → 向参考同 band 靠拢（均值平移，
+    保留 band 内色相对比），偏移限在各 band 的 max_shift 内；参考缺该 band 则不动(不吃色)。
+    青蓝紫为宽 band，允许蓝大幅靠向青。"""
+    so, sw = _band_offsets(src_hsv)
+    ro, rw = _band_offsets(ref_hsv)
+    dhue_band = np.zeros(len(_BANDS))
+    for bi, (c, hw, ms) in enumerate(_BANDS):
+        if sw[bi] < _W_MIN or rw[bi] < _W_MIN:
+            continue
+        dhue_band[bi] = np.clip(ro[bi] - so[bi], -ms, ms)
+
+    hue_j = (np.arange(_HN) + 0.5) / _HN
+    centers = np.array([c for c, _, _ in _BANDS])
+    hws = np.array([hw for _, hw, _ in _BANDS])
     hue_map = hue_j.copy()
-    centers = (np.arange(_NB) + 0.5) / _NB
     for i in range(_HN):
-        m = np.clip(1 - cdist(centers, hue_j[i]) * _NB, 0, 1)     # 到各 band 的软隶属
+        d = np.minimum(np.abs(centers - hue_j[i]), 1 - np.abs(centers - hue_j[i]))
+        m = np.clip(1 - d / hws, 0, 1)                # 到各 band 的软隶属（各自半宽）
         tot = m.sum()
         if tot > 1e-6:
             hue_map[i] = (hue_j[i] + (m * dhue_band).sum() / tot) % 1.0
@@ -156,7 +183,7 @@ def _grade_shifts(src01, ref01):
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=1.0, grade_str=0.7) -> str:
+                 hue_str=1.0, sat_str=1.0, val_str=0.6, grade_str=0.7) -> str:
     """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 +
     颜色分级(阴影/中间/高光三区色度匹配参考，保亮度) → .cube 3D LUT。"""
     src01, ref01 = _to01(src_rgb), _to01(ref_rgb)
@@ -185,11 +212,10 @@ def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
              'DOMAIN_MIN 0.0 0.0 0.0', 'DOMAIN_MAX 1.0 1.0 1.0', '']
     lines.extend(f'{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}' for v in out)
     # 摘要：每 band 的色相位移
-    band_dhue = np.zeros(_NB, np.float32)
-    for b in range(_NB):
-        c = (b + 0.5) / _NB
+    band_dhue = np.zeros(len(_BANDS), np.float32)
+    for bi, (c, _, _) in enumerate(_BANDS):
         t = hue_map[int(c * _HN) % _HN]
-        band_dhue[b] = (((t - c + 0.5) % 1.0) - 0.5)
+        band_dhue[bi] = (((t - c + 0.5) % 1.0) - 0.5)
     return '\n'.join(lines) + '\n', (band_dhue, None, None)
 
 

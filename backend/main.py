@@ -34,8 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 12 个色相 band 的名字（与 hue_transfer._NB 对应，中心 (b+0.5)/12）
-_BAND_NAMES = ['红', '橙', '黄', '黄绿', '绿', '青绿', '青', '蓝青', '蓝', '紫', '品红', '洋红']
+# 与 hue_transfer._BANDS 对应的 band 名字（青蓝紫合并为宽 band）
+_BAND_NAMES = ['红', '橙', '黄', '黄绿', '绿', '青蓝紫', '品红']
 
 
 def _shrink(rgb: np.ndarray, max_side: int = 256) -> np.ndarray:
