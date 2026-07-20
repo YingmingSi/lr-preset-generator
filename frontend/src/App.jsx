@@ -183,6 +183,7 @@ export default function App() {
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI Style");
   const [strength,    setStrength]    = useState(1.0);  // 迁移强度：0=原图，1=完整迁移，>1=加强
+  const [modeChoice,  setModeChoice]  = useState("auto"); // auto / A(精确复刻同图) / B(色相迁移)
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -267,6 +268,7 @@ export default function App() {
     form.append("src_image",    srcFile);
     form.append("ref_image",    refFile);
     form.append("preset_name",  presetName);
+    form.append("mode",         modeChoice);
 
     // 冷启动可能失败/超时，自动重试（每次间隔递增，覆盖 ~40s 唤醒窗口）
     const submit = async () => {
@@ -358,6 +360,22 @@ export default function App() {
               accept="image/*,.cr2,.cr3,.nef,.arw,.raf,.dng,.rw2"
               style={{ display: "none" }}
               onChange={e => handleFile(e.target.files[0], "src")} />
+          </div>
+
+          {/* Mode selector */}
+          <div style={{ marginBottom: "12px" }}>
+            <FieldLabel>迁移模式（自动判别不准时手动指定）</FieldLabel>
+            <div style={{ display: "flex", gap: "6px", marginTop: "5px" }}>
+              {[["auto", "自动"], ["A", "精确复刻（同一张图）"], ["B", "色相迁移（不同照片）"]].map(([v, label]) => (
+                <button key={v} onClick={() => setModeChoice(v)} style={{
+                  flex: 1, padding: "7px 8px", fontSize: "11px", fontFamily: "monospace",
+                  cursor: "pointer", letterSpacing: "0.04em",
+                  background: modeChoice === v ? COLORS.accentDim : COLORS.surface,
+                  color: modeChoice === v ? "#000" : COLORS.textDim,
+                  border: `1px solid ${modeChoice === v ? COLORS.accent : COLORS.border}`,
+                }}>{label}</button>
+              ))}
+            </div>
           </div>
 
           {/* Options row */}

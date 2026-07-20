@@ -47,14 +47,13 @@ def _shrink(rgb: np.ndarray, max_side: int = 256) -> np.ndarray:
 
 
 def _summary(deltas) -> dict:
-    """每 band 的 色相/饱和/亮度 调整 → 前端摘要（只显示有变化的）。"""
-    dhue, srat, dval = deltas
+    """每 band 的色相位移 → 前端摘要（只显示有变化的）。"""
+    dhue = deltas[0]
     picked = {}
     for b, name in enumerate(_BAND_NAMES):
-        if abs(dhue[b]) < 1e-3 and abs(srat[b] - 1) < 0.02 and abs(dval[b]) < 1e-3:
+        if abs(dhue[b]) < 2e-3:
             continue
-        picked[name] = (f"色相{dhue[b] * 360:+.0f}° "
-                        f"饱和×{srat[b]:.2f} 亮度{dval[b] * 100:+.0f}")
+        picked[name] = f"色相{dhue[b] * 360:+.0f}°"
     return {'色相迁移': picked}
 
 
@@ -68,6 +67,7 @@ async def analyze(
     src_image:   UploadFile = File(...),
     ref_image:   UploadFile = File(...),
     preset_name: str = Form("AI Style"),
+    mode:        str = Form("auto"),      # auto / A(精确复刻) / B(色相迁移)
 ):
     src_bytes = await src_image.read()
     ref_bytes = await ref_image.read()
@@ -81,7 +81,8 @@ async def analyze(
         ref_rgb = _shrink((ref_data['rgb_float'] * 255).clip(0, 255).astype(np.uint8), 256)
         del src_data, ref_data, src_bytes, ref_bytes
 
-        if is_aligned(src_rgb, ref_rgb):
+        use_A = (mode == "A") or (mode == "auto" and is_aligned(src_rgb, ref_rgb))
+        if use_A:
             # 情况A：同一张图调色 → 空间对应，精确复刻（含色相旋转）
             if ref_rgb.shape != src_rgb.shape:
                 ref_rgb = np.asarray(Image.fromarray(ref_rgb).resize(
