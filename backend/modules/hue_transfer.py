@@ -78,19 +78,22 @@ def build_hue_map(dens, thr=0.08):
     dmax = float(dens.max())
     if dmax < 1e-9:
         return hue_j.copy()
-    supp = hue_j[dens > thr * dmax]                  # 参考里"有"的色相
-    if supp.size == 0:
-        return hue_j.copy()
 
     def cdist(a, b):
         d = np.abs(a - b); return np.minimum(d, 1 - d)
 
-    conf = np.clip(dens / (thr * dmax), 0, 1)        # 支撑度：≥阈值→1(保持)，0→吸附
+    # 参考的色相"峰"（局部极大 + 够高）——缺失色吸附到最近的峰【中心】
+    is_peak = (dens >= np.roll(dens, 1)) & (dens >= np.roll(dens, -1)) & (dens > thr * dmax)
+    peaks = hue_j[is_peak]
+    if peaks.size == 0:
+        peaks = hue_j[[int(np.argmax(dens))]]
+
+    conf = np.clip(dens / (thr * dmax), 0, 1)        # 支撑度：≥阈值→1(保持)，0→吸附到峰
     hue_map = np.empty(_HN)
     for i in range(_HN):
-        near = float(supp[np.argmin(cdist(supp, hue_j[i]))])       # 最近 present 色相
-        d = (((near - hue_j[i] + 0.5) % 1.0) - 0.5)               # 环形有向差
-        hue_map[i] = (hue_j[i] + (1 - conf[i]) * d) % 1.0         # 有→identity，无→吸附
+        near = float(peaks[np.argmin(cdist(peaks, hue_j[i]))])      # 最近的参考色相峰
+        d = (((near - hue_j[i] + 0.5) % 1.0) - 0.5)
+        hue_map[i] = (hue_j[i] + (1 - conf[i]) * d) % 1.0           # 有→identity，无→吸附到峰
     return hue_map
 
 
@@ -100,7 +103,10 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
     （保留原图同色相内的明暗/饱和对比，不抹平），护中性。"""
     hsv = rgb_to_hsv_vectorized(rgb01)
     H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    swt = np.clip(S * 2, 0, 1)
+    # 只护"近中性"(S<~0.14)，淡色(如天空 S~0.2)也充分调整——
+    # 色相在低饱和像素上本就看不见，削弱它会让淡蓝够不到青、饱和也提不起来
+    t = np.clip((S - 0.03) / (0.14 - 0.03), 0, 1)
+    swt = t * t * (3 - 2 * t)
     hi = np.clip((H * _HN).astype(int), 0, _HN - 1)
     # 1) 色相：分布匹配
     dhue = (((hue_map[hi] - H + 0.5) % 1.0) - 0.5)
