@@ -182,9 +182,7 @@ export default function App() {
   const [refPreview,  setRefPreview]  = useState(null);
   const [srcPreview,  setSrcPreview]  = useState(null);
   const [presetName,  setPresetName]  = useState("AI Style");
-  const [colorAmt,    setColorAmt]    = useState(1.0);  // 颜色迁移：0=原图颜色，1=完整参考色彩风格
-  const [toneAmt,     setToneAmt]     = useState(0);    // 影调迁移：0=保留原图明暗，1=跟随参考影调
-  const [strength,    setStrength]    = useState(1.0);  // 应用强度：整体不透明度
+  const [strength,    setStrength]    = useState(1.0);  // 迁移强度：0=原图，1=完整迁移，>1=加强
   const [loading,     setLoading]     = useState(false);
   const [result,      setResult]      = useState(null);
   const [error,       setError]       = useState(null);
@@ -215,31 +213,27 @@ export default function App() {
         orig[i * 3 + 1] = imgData.data[i * 4 + 1] / 255;
         orig[i * 3 + 2] = imgData.data[i * 4 + 2] / 255;
       }
-      const cnnColor = applyLutToImage(imgData, parseCube(result.lut_color || result.lut_content));
-      const cnnFull  = applyLutToImage(imgData, parseCube(result.lut_content));
-      bufs.current = { w, h, orig, cnnColor, cnnFull };
-      renderPreview(colorAmt, toneAmt, strength);
+      const lut = applyLutToImage(imgData, parseCube(result.lut_content));
+      bufs.current = { w, h, orig, lut };
+      renderPreview(strength);
     };
     img.src = srcPreview;
   }, [result, srcPreview]);
 
-  // 任一滑块变化时实时渲染
-  useEffect(() => { renderPreview(colorAmt, toneAmt, strength); }, [colorAmt, toneAmt, strength]);
+  // 迁移强度变化时实时渲染
+  useEffect(() => { renderPreview(strength); }, [strength]);
 
-  const renderPreview = (ca, t, s) => {
+  const renderPreview = (s) => {
     const b = bufs.current, cv = previewCanvas.current;
     if (!b || !cv) return;
     cv.width = b.w; cv.height = b.h;
     const ctx = cv.getContext("2d");
     const out = ctx.createImageData(b.w, b.h);
     for (let i = 0; i < b.w * b.h; i++) {
-      const j = i * 3;
-      const orig = [b.orig[j], b.orig[j + 1], b.orig[j + 2]];
-      const v = stylePixel(orig, b.cnnColor[j], b.cnnColor[j + 1], b.cnnColor[j + 2],
-        b.cnnFull[j], b.cnnFull[j + 1], b.cnnFull[j + 2], ca, t, s);
-      out.data[i * 4] = v[0] * 255;
-      out.data[i * 4 + 1] = v[1] * 255;
-      out.data[i * 4 + 2] = v[2] * 255;
+      for (let ax = 0; ax < 3; ax++) {
+        const v = b.orig[i * 3 + ax] * (1 - s) + b.lut[i * 3 + ax] * s;  // 原图↔迁移 混合
+        out.data[i * 4 + ax] = Math.max(0, Math.min(255, v * 255));
+      }
       out.data[i * 4 + 3] = 255;
     }
     ctx.putImageData(out, 0, 0);
@@ -310,22 +304,20 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
-  // 把三滑块烘焙进 .cube（与预览完全一致）
+  // 把迁移强度烘焙进 .cube（LUT 向 identity 混合，与预览一致）
   const lutWithStrength = () => {
     if (!result?.lut_content) return null;
-    const { size: N, data: dFull } = parseCube(result.lut_content);
-    const { data: dColor } = parseCube(result.lut_color || result.lut_content);
+    if (strength === 1.0) return result.lut_content;
+    const { size: N, data } = parseCube(result.lut_content);
     const lines = [];
     for (const l of result.lut_content.split("\n")) {
       if (/^[0-9.]/.test(l.trim())) break;
       lines.push(l);
     }
-    for (let i = 0; i < dFull.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       const r = i % N, g = Math.floor(i / N) % N, b = Math.floor(i / (N * N));
       const id = [r / (N - 1), g / (N - 1), b / (N - 1)];
-      const v = stylePixel(id, dColor[i][0], dColor[i][1], dColor[i][2],
-        dFull[i][0], dFull[i][1], dFull[i][2], colorAmt, toneAmt, strength);
-      lines.push(`${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}`);
+      const v = data[i].map((x, k) => Math.max(0, Math.min(1, id[k] * (1 - strength) + x * strength)));
     }
     return lines.join("\n") + "\n";
   };
@@ -448,22 +440,12 @@ export default function App() {
                     <canvas ref={previewCanvas} style={{ width: "100%", marginTop: "6px", border: `1px solid ${COLORS.accent}`, display: "block" }} />
                   </div>
                 </div>
-                {/* 颜色迁移 + 影调迁移 + 应用强度 */}
-                <div style={{ marginTop: "16px", display: "grid", gap: "14px" }}>
-                  <Slider label="颜色迁移" value={colorAmt} min={0} max={1} step={0.05}
-                    display={`${Math.round(colorAmt * 100)}%`}
-                    onChange={setColorAmt}
-                    ends={["0% 原图颜色", "100% 参考色彩风格"]} />
-                  {result.lut_color && (
-                    <Slider label="影调迁移" value={toneAmt} min={0} max={1} step={0.05}
-                      display={`${Math.round(toneAmt * 100)}%`}
-                      onChange={setToneAmt}
-                      ends={["0% 保留原图明暗", "100% 跟随参考影调"]} />
-                  )}
-                  <Slider label="应用强度" value={strength} min={0} max={1} step={0.05}
+                {/* 迁移强度 */}
+                <div style={{ marginTop: "16px" }}>
+                  <Slider label="迁移强度" value={strength} min={0} max={1.5} step={0.05}
                     display={`${Math.round(strength * 100)}%`}
                     onChange={setStrength}
-                    ends={["0% 原图", "100% 全量"]} />
+                    ends={["0% 原图", "100% 标准 · 150% 加强"]} />
                 </div>
               </div>
             )}
@@ -570,7 +552,7 @@ function ReportTab({ result }) {
   const groups = Object.entries(result.summary || {}).filter(([, v]) => Object.keys(v).length);
   return (
     <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "24px" }}>
-      <Label>风格摘要 · CNN 预测的颜色变换</Label>
+      <Label>风格摘要 · 按色相匹配的颜色迁移</Label>
       <div style={{ marginTop: "10px" }}>
         {groups.length === 0
           ? <div style={{ fontSize: "12px", color: COLORS.textMuted, fontFamily: "monospace" }}>接近原图（变化很小）</div>
