@@ -142,14 +142,19 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
     # 2) 饱和/亮度：整体平移 = 参考(目标色相均值) − 原图(原色相均值)，保留个体偏差
     oi = np.clip((oH * _HN).astype(int), 0, _HN - 1)
     conf = np.clip(dens[oi] / (dens.max() + 1e-9), 0, 1)
-    dS = (r_sat[oi] - s_sat[hi]) * swt * conf
-    dV = (r_val[oi] - s_val[hi]) * swt * conf
-    # 过曝/死黑保护：接近极值时减弱该方向的推动（亮部别再提亮、暗部别再压暗、别过饱和）
     def sstep(a, b, x):
         t = np.clip((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t)
+    # 饱和度：乘法匹配（按比例缩放，低饱和色不被过度加成 → 唇红不会变暗红）
+    ratio = np.clip(r_sat[oi] / (s_sat[hi] + 1e-3), 0.4, 2.5)
+    reff = 1 + (ratio - 1) * sat_str * swt * conf
+    oS = S * reff
+    # 余量保护：软封顶（渐近不超 1，避免过饱和）
+    k = 0.90
+    oS = np.where(oS > k, k + (1 - k) * np.tanh((oS - k) / (1 - k)), oS)
+    oS = np.clip(oS, 0, 1)
+    # 亮度：加法平移（保明暗对比）+ 过曝/死黑保护
+    dV = (r_val[oi] - s_val[hi]) * swt * conf
     gV = np.where(dV > 0, 1 - sstep(0.82, 1.0, V), sstep(0.0, 0.18, V))
-    gS = np.where(dS > 0, 1 - sstep(0.85, 1.0, S), 1.0)
-    oS = np.clip(S + sat_str * dS * gS, 0, 1)
     oV = np.clip(V + val_str * dV * gV, 0, 1)
     return np.clip(hsv_to_rgb_vectorized(np.stack([oH, oS, oV], axis=-1)), 0, 1)
 
@@ -184,6 +189,12 @@ def _grade_shifts(src01, ref01):
     shared = 0.5 * (grade[0] + grade[2])
     grade[0] -= 0.45 * shared
     grade[2] -= 0.45 * shared
+    # 幅度封顶(≈LR 分级饱和≤10)：不同内容时(参考海/原图山)防大片海洋蓝造成过强色偏
+    cap = 0.06
+    for z in range(3):
+        m = float(np.sqrt((grade[z] ** 2).sum()))
+        if m > cap:
+            grade[z] *= cap / m
     return grade
 
 
