@@ -34,8 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 与 hue_transfer._BANDS 对应的 band 名字（青蓝紫各自独立，按 LR HSL 分法）
-_BAND_NAMES = ['红', '橙', '黄', '黄绿', '绿', '青', '蓝', '紫', '品红']
+# 与 hue_transfer._BANDS 对应的 band 名字（青蓝紫合并为宽 band）
+_BAND_NAMES = ['红', '橙', '黄', '黄绿', '绿', '青蓝紫', '品红']
 
 
 def _shrink(rgb: np.ndarray, max_side: int = 256) -> np.ndarray:

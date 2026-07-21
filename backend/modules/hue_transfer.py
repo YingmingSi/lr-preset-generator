@@ -71,17 +71,15 @@ def _ref_maps(ref_hsv):
 
 
 # 非均匀色相 band：(中心, 半宽, 最大偏移) 单位=色相比例(×360=度)
-# 按 LR HSL 分法细分（红橙黄绿青蓝紫洋红）。青/蓝/紫【各自独立】：蓝匹配蓝、青匹配青，
-# 参考缺某色则原图该色不动，不会把蓝一路拽过青绿→防海水偏绿。各 band 偏移有界、防塌。
+# 暖色(红橙黄绿)细分、小幅调整、防塌；青蓝紫合并成一个【宽 band】、允许大幅靠拢(蓝→青)——
+# 三色常一起调，合并用均值平移保留其间对比；配非线性窗+下限护栏防过冲进绿。
 _BANDS = [
     (0.00, 0.055, 0.07),   # 红
     (0.09, 0.05,  0.07),   # 橙
     (0.16, 0.05,  0.07),   # 黄
     (0.25, 0.06,  0.08),   # 黄绿
     (0.35, 0.09,  0.08),   # 绿
-    (0.50, 0.07,  0.09),   # 青
-    (0.63, 0.07,  0.09),   # 蓝
-    (0.77, 0.07,  0.09),   # 紫
+    (0.65, 0.22,  0.19),   # 青蓝紫（宽，最大偏移 ~68°）
     (0.90, 0.06,  0.08),   # 品红
 ]
 
@@ -120,8 +118,8 @@ def build_hue_map(src_hsv, ref_hsv):
     centers = np.array([c for c, _, _ in _BANDS])
     hws = np.array([hw for _, hw, _ in _BANDS])
     mss = np.array([ms for _, _, ms in _BANDS])
-    # 青 band 最靠绿、最易过冲：输出不得比"参考实际的青"更绿。
-    # 下限护栏 = 参考青均值 − 1.5σ（参考色相范围下沿），防偏移把青推进绿。
+    # 宽 band(青蓝紫)最易过冲：允许蓝→青，但输出不得比"参考实际的青"更绿。
+    # 下限护栏 = 参考冷色均值 − 1.5σ（参考色相范围下沿），防常数平移把边缘青推进绿。
     wide = int(np.argmax(mss))
     guard_lo = centers[wide] + ro[wide] - 1.5 * rsd[wide] - 0.02
     guarded = rw[wide] >= _W_MIN
@@ -218,23 +216,23 @@ def _grade_shifts(src01, ref01):
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=0.5, grade_str=1.0) -> str:
-    """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 +
-    颜色分级(阴影/中间/高光三区色度匹配参考，保亮度) → .cube 3D LUT。"""
+                 hue_str=1.0, sat_str=1.0, val_str=0.5, grade_str=0.0) -> str:
+    """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 → .cube 3D LUT。
+    颜色分级默认关闭(grade_str=0)：内容色常污染取样、实用价值低；仍可传参启用。"""
     src01, ref01 = _to01(src_rgb), _to01(ref_rgb)
     src_hsv = rgb_to_hsv_vectorized(src01)
     ref_hsv = rgb_to_hsv_vectorized(ref01)
     _, s_sat, s_val = _ref_maps(src_hsv)                # 原图每色相均值
     dens, r_sat, r_val = _ref_maps(ref_hsv)
     hue_map = build_hue_map(src_hsv, ref_hsv)
-    gsh = _grade_shifts(src01, ref01)                  # (3,3) 三区色度差
     N = size
     idx = np.arange(N ** 3)
     grid = np.stack([idx % N, (idx // N) % N, idx // (N * N)], axis=1).astype(np.float32) / (N - 1)
     out = _apply(grid.reshape(N, N * N, 3), hue_map, dens, s_sat, s_val, r_sat, r_val,
                  hue_str, sat_str, val_str).reshape(N ** 3, 3)
-    # 颜色分级：按每个输出色的亮度，叠加三区色度差（保亮度）
+    # 颜色分级：按每个输出色的亮度，叠加三区色度差（保亮度）——默认关闭
     if grade_str > 0:
+        gsh = _grade_shifts(src01, ref01)              # (3,3) 三区色度差
         Lg = out @ _LUMA3
         sw, mw, hw = _zone_weights(Lg)
         grade = sw[:, None] * gsh[0] + mw[:, None] * gsh[1] + hw[:, None] * gsh[2]
