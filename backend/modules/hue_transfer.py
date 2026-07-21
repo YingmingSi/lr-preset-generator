@@ -143,7 +143,7 @@ def build_hue_map(src_hsv, ref_hsv):
 
 
 def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
-           hue_str=1.0, sat_str=1.0, val_str=0.5):
+           hue_str=1.0, sat_str=1.2, val_str=1.0):
     """色相分布匹配；饱和/亮度按【参考均值 − 原图均值】整体平移
     （保留原图同色相内的明暗/饱和对比，不抹平），护中性。"""
     hsv = rgb_to_hsv_vectorized(rgb01)
@@ -158,7 +158,9 @@ def _apply(rgb01, hue_map, dens, s_sat, s_val, r_sat, r_val,
     oH = (H + hue_str * dhue * swt) % 1.0
     # 2) 饱和/亮度：整体平移 = 参考(目标色相均值) − 原图(原色相均值)，保留个体偏差
     oi = np.clip((oH * _HN).astype(int), 0, _HN - 1)
-    conf = np.clip(dens[oi] / (dens.max() + 1e-9), 0, 1)
+    # 密度置信开方软化：抬高"存在但非最主流"的色(如水)的调节力度，让饱和/亮度够到参考水平；
+    # 参考缺该色相处仍 →0（保护，不把无中生有的色往灰里拉）
+    conf = np.clip(dens[oi] / (dens.max() + 1e-9), 0, 1) ** 0.5
     def sstep(a, b, x):
         t = np.clip((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t)
     # 饱和度：乘法匹配（按比例缩放，低饱和色不被过度加成 → 唇红不会变暗红）
@@ -216,7 +218,7 @@ def _grade_shifts(src01, ref01):
 
 
 def bake_hue_lut(src_rgb, ref_rgb, size=33, title="AI Style",
-                 hue_str=1.0, sat_str=1.0, val_str=0.5, grade_str=0.0) -> str:
+                 hue_str=1.0, sat_str=1.2, val_str=1.0, grade_str=0.0) -> str:
     """双图 per-band 色相有界靠拢 + 饱和/亮度按每色相均值平移 → .cube 3D LUT。
     颜色分级默认关闭(grade_str=0)：内容色常污染取样、实用价值低；仍可传参启用。"""
     src01, ref01 = _to01(src_rgb), _to01(ref_rgb)
