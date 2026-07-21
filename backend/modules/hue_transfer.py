@@ -130,7 +130,11 @@ def build_hue_map(src_hsv, ref_hsv):
         tot = m.sum()
         if tot <= 1e-6:
             continue
-        out = hue_j[i] + (m * dhue_band).sum() / tot
+        # 非线性窗：离 band 中心越近(远离边界)偏移越大、近边界越小(smoothstep)——
+        # 边界色(如青绿交界的松石)偏移≈0 不被拽过界；band 中心色(纯蓝)充分迁移
+        mm = float(m.max())
+        w = mm * mm * (3 - 2 * mm)
+        out = hue_j[i] + ((m * dhue_band).sum() / tot) * w
         # 冷色主导时，输出不低于参考色相下沿（只挡"更绿"，不夹蓝/紫那侧→保留紫）
         if guarded and m[wide] == m.max() and out < guard_lo:
             out = guard_lo
