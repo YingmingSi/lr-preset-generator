@@ -198,7 +198,7 @@ def _grade_shifts(src01, ref01):
         L = img @ _LUMA3
         chroma = (img - L[..., None]).reshape(-1, 3)
         cmag = np.sqrt((chroma ** 2).sum(1))              # 每像素色度大小 ≈ 饱和度
-        neutral = np.clip((0.16 - cmag) / (0.16 - 0.04), 0, 1)  # 只取近中性灰面(饱和内容排除)
+        neutral = np.clip((0.10 - cmag) / (0.10 - 0.02), 0, 1)  # 只取真正近灰面(cmag<0.10)，排除水/天等淡色内容
         sh, mid, hi = (w.reshape(-1) * neutral for w in _zone_weights(L))
         return tuple((chroma * w[:, None]).sum(0) / (w.sum() + 1e-9) for w in (sh, mid, hi))
     s_sh, s_mid, s_hi = zone_chroma(src01)
@@ -209,7 +209,7 @@ def _grade_shifts(src01, ref01):
     grade[0] -= 0.45 * shared
     grade[2] -= 0.45 * shared
     # 幅度封顶(≈LR 分级饱和≤10)：不同内容时(参考海/原图山)防大片海洋蓝造成过强色偏
-    cap = 0.06
+    cap = 0.04
     for z in range(3):
         m = float(np.sqrt((grade[z] ** 2).sum()))
         if m > cap:
