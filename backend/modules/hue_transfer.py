@@ -85,10 +85,10 @@ _BANDS = [
 
 
 def _band_offsets(hsv):
-    """每个 band 的 加权(饱和度) 平均色相偏移(相对 band 中心) 与 权重。"""
+    """每个 band 的 加权(饱和度) 平均色相偏移(相对 band 中心)、权重、色相离散度(σ)。"""
     H = hsv[..., 0].ravel(); S = hsv[..., 1].ravel()
     n = len(_BANDS)
-    offs = np.zeros(n); ws = np.zeros(n)
+    offs = np.zeros(n); ws = np.zeros(n); sds = np.zeros(n)
     for bi, (c, hw, _) in enumerate(_BANDS):
         d = np.minimum(np.abs(H - c), 1 - np.abs(H - c))
         m = np.clip(1 - d / hw, 0, 1) * S
@@ -96,16 +96,18 @@ def _band_offsets(hsv):
         if wsum < _W_MIN:
             continue
         hoff = (((H - c + 0.5) % 1.0) - 0.5)
-        offs[bi] = float((hoff * m).sum() / wsum); ws[bi] = wsum
-    return offs, ws
+        mean = float((hoff * m).sum() / wsum)
+        offs[bi] = mean; ws[bi] = wsum
+        sds[bi] = float(np.sqrt(max((((hoff - mean) ** 2) * m).sum() / wsum, 0.0)))
+    return offs, ws, sds
 
 
 def build_hue_map(src_hsv, ref_hsv):
     """双图 per-band 色相靠拢：源每个 band 的平均色相 → 向参考同 band 靠拢（均值平移，
     保留 band 内色相对比），偏移限在各 band 的 max_shift 内；参考缺该 band 则不动(不吃色)。
     青蓝紫为宽 band，允许蓝大幅靠向青。"""
-    so, sw = _band_offsets(src_hsv)
-    ro, rw = _band_offsets(ref_hsv)
+    so, sw, _   = _band_offsets(src_hsv)
+    ro, rw, rsd = _band_offsets(ref_hsv)
     dhue_band = np.zeros(len(_BANDS))
     for bi, (c, hw, ms) in enumerate(_BANDS):
         if sw[bi] < _W_MIN or rw[bi] < _W_MIN:
@@ -115,13 +117,24 @@ def build_hue_map(src_hsv, ref_hsv):
     hue_j = (np.arange(_HN) + 0.5) / _HN
     centers = np.array([c for c, _, _ in _BANDS])
     hws = np.array([hw for _, hw, _ in _BANDS])
+    mss = np.array([ms for _, _, ms in _BANDS])
+    # 宽 band(青蓝紫)最易过冲：允许蓝→青，但输出不得比"参考实际的青"更绿。
+    # 下限护栏 = 参考冷色均值 − 1.5σ（参考色相范围下沿），防常数平移把边缘青推进绿。
+    wide = int(np.argmax(mss))
+    guard_lo = centers[wide] + ro[wide] - 1.5 * rsd[wide] - 0.02
+    guarded = rw[wide] >= _W_MIN
     hue_map = hue_j.copy()
     for i in range(_HN):
         d = np.minimum(np.abs(centers - hue_j[i]), 1 - np.abs(centers - hue_j[i]))
         m = np.clip(1 - d / hws, 0, 1)                # 到各 band 的软隶属（各自半宽）
         tot = m.sum()
-        if tot > 1e-6:
-            hue_map[i] = (hue_j[i] + (m * dhue_band).sum() / tot) % 1.0
+        if tot <= 1e-6:
+            continue
+        out = hue_j[i] + (m * dhue_band).sum() / tot
+        # 冷色主导时，输出不低于参考色相下沿（只挡"更绿"，不夹蓝/紫那侧→保留紫）
+        if guarded and m[wide] == m.max() and out < guard_lo:
+            out = guard_lo
+        hue_map[i] = out % 1.0
     return hue_map
 
 
